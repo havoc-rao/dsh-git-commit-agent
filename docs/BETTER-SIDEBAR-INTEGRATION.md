@@ -1,119 +1,139 @@
-# better-sidebar integration: required contract (minimal independent PRs)
+# better-sidebar integration contract (available)
 
-`dsh-git-commit-agent` deliberately does **not** depend on `DSH-better-sidebar`,
-and it does not reach into that package's private components or its `/sidebar/api`
-routes. The GitLens button and the plan-diff preview are the only two things that
-cannot be built from outside, because the current public surface exposes neither.
+Status: **delivered and implemented** by the `DSH-better-sidebar` workspace on
+branch `feat/git-commit-action-seam` @ `edf6837` (local branch, not pushed).
+This replaces the earlier *contract request*: the seams below now exist and can
+be consumed directly.
 
-This document is the **contract request**, not an implementation. Both changes
-are additive, return disposers, live in `src/` (never in the generated `lib/`),
-and leave behaviour identical when no plugin registers.
+Our original read-only audit was confirmed, with two corrections: the diff page
+render point is `DiffTab.tsx` (not `DiffPane.tsx`, which is the inline changes
+preview), and `repoRoot` is written back from `status.root` while
+`selectedWorktree` is set by the worktree selector / auto-selection.
 
-## PR #1 — GitLens commit-action seam (required for the button)
+`dsh-git-commit-agent` still does **not** depend on `dsh-better-sidebar`. The
+plugin mounts and works without it (command/API entry); these seams only add the
+GitLens button and the plan-diff preview.
 
-**Problem.** `src/client/changes/GitLens.tsx:559-578` renders the commit row as
-literal JSX (`<Input>` + `<button className={css.gitCommitButton}>`). There is no
-slot, no registry, and no way for an external plugin to add a button there.
-The selected repository (`GitLens.tsx:119`) and selected worktree
-(`GitLens.tsx:118`) live in component-local `useState` and are never published,
-so an external plugin cannot even learn *which* worktree the user is looking at.
+## 1. Confirmed public names (line numbers are post-change)
 
-**Requested contract** (all in `src/client/service.ts`):
+| Name | Signature / value | Evidence |
+| --- | --- | --- |
+| register action | `registerGitCommitAction(descriptor: GitCommitActionDescriptor): () => void` — returns a disposer; duplicate `id` throws | decl `src/client/service.ts:565`, impl `:898` |
+| descriptor | `GitCommitActionDescriptor { id; order?; available?; component }` | `src/client/service.ts:542` |
+| props | `GitCommitActionProps extends GitCommitTarget { service; refresh() }` | `src/client/service.ts:526` |
+| target | `GitCommitTarget { scope; repoRoot?; worktree?; branch?; status; staged }` | `src/client/service.ts:507` |
+| list actions | `getGitCommitActions(): readonly GitCommitActionDescriptor[]` | decl `:567`, impl `:912` |
+| read target | `getGitCommitTarget(scope?: SessionScope): GitCommitTarget \| undefined` | decl `:579`, impl `:926` |
+| publish target | `setGitCommitTarget(ownerId: string, target: GitCommitTarget \| null): void` (`@internal`, called by GitLens only) | decl `:708`, impl `:917` |
+| feature flags | `'gitCommitActions'`, `'planDiff'` | `SIDEBAR_FEATURES`, `src/client/service.ts:802-803` |
+| render position | inside the Git commit row `css.gitCommit`, **after** the built-in Commit button; wrapped in `role="group"` + `aria-label={t('gitCommitActions')}` | `src/client/changes/GitLens.tsx:660-671` (action list `:500-521`, target `:459-478`, publish `:480`/`:487`, subscribe `:492-496`) |
+| row styles | `.gitCommitActions`, `.gitCommitActionBoundary` | `src/client/changes/changes.module.css:224`, `:232` |
+| proposed diff | `{ kind: 'proposed'; id; title; patch; worktree?; repoRoot? }` | `src/client/state.ts:39-49` |
+| narrowed alias | `GitDiffRef = Extract<SidebarDiffRef, { kind: 'worktree' \| 'commit' }>` | `src/client/state.ts:56` (re-exported `service.ts:46`) |
+| diff rendering | proposed branch (zero git calls) + title | `src/client/DiffTab.tsx:59-63`, `:29`, `:120` |
+| integration guide | new §7.2 | `docs/external-plugin-guide.md` |
 
-```ts
-export interface GitCommitTarget {
-  scope: SessionScope
-  /** Live value of GitLens' own repoRoot state. */
-  repoRoot?: string
-  /** Live value of GitLens' selectedWorktree state (undefined = primary). */
-  worktree?: string
-  branch?: string
-  status: GitStatusResult
-  /** Exactly the list the Commit button gates on. */
-  staged: readonly GitStatusEntry[]
-}
+Semantics: `order` ascending (default 100) then registration order;
+`available(target) === false` skips the action; a throwing `available` is logged
+and skipped; each action is wrapped in its own `RenderBoundary`, so one broken
+component cannot break the commit row. Register/unregister notify through the
+existing `subscribe()`, so an action registered after mount appears immediately.
+With zero registrations the commit row DOM is unchanged.
 
-export interface GitCommitActionProps extends GitCommitTarget {
-  service: BetterSidebarService
-  /** Re-runs GitLens' status/branch/log refresh. */
-  refresh(): Promise<void>
-}
+## 2. Reading session / repo / worktree / staged
 
-export interface GitCommitActionDescriptor {
-  id: string
-  title: string | (() => string)
-  icon?: ReactNode | ((size: number) => ReactNode)
-  /** Ascending; default 100. */
-  order?: number
-  available?: (target: GitCommitTarget) => boolean
-  component: (props: GitCommitActionProps) => ReactNode
-}
-
-// on BetterSidebarService:
-registerGitCommitAction(descriptor: GitCommitActionDescriptor): () => void
-getGitCommitActions(): readonly GitCommitActionDescriptor[]
-```
-
-Plus:
-
-1. Add `'gitCommitActions'` to `SIDEBAR_FEATURES` (`service.ts:697-710`) so
-   consumers gate on `features.includes('gitCommitActions')`.
-2. Render registered actions inside the existing `css.gitCommit` row
-   (`GitLens.tsx:559-578`), after the Commit button, ordered by `order` then
-   registration order, skipping `available === false`.
-3. Notify existing subscribers through the current `subscribe()` mechanism so an
-   open GitLens re-renders when the registry changes.
-
-**Optional, same PR:** `setGitCommitStatus(ownerId, targetKey, status | null)`
-with `status = { label, tone?: 'info'|'busy'|'ok'|'error', sessionId?: string }`,
-rendered inline in the same row. The "return to the source session" action needs
-no better-sidebar change: the registered component can call the host's
-`ctx.sessions.open?.(sessionId)` itself.
-
-**What the agent plugin does with it.** The registered component:
-- calls `GET`-equivalent `gitCommitAgent.openTask({ sourceSessionId: scope.sessionId, workspaceRoot: worktree ?? repoRoot })`;
-- opens the dedicated session (the plugin creates it; see `startDedicatedSession`);
-- is disabled when there is no repository, no changes, or the target is still resolving.
-
-## PR #2 — Proposed-diff seam (required for the plan preview)
-
-**Problem.** `src/client/state.ts:23-25`:
+### A. Preferred — the action component's props (always live)
 
 ```ts
-export type SidebarDiffRef = { kind: 'worktree' } | { kind: 'commit'; ... }
+ctx.betterSidebar.registerGitCommitAction({
+  id: 'dsh-git-commit-agent:commit',
+  order: 50,
+  available: (t) => t.status.isRepo,
+  component: ({ scope, repoRoot, worktree, branch, status, staged, service, refresh }) => {
+    const sourceSessionId = scope.sessionId   // source coding session
+    const workspaceRoot = worktree ?? repoRoot // what openTask({ workspaceRoot }) needs
+    const canCommit = staged.length > 0        // same gate as the built-in Commit button
+    return /* our own button — title/icon live here, not in the descriptor */
+  },
+})
 ```
 
-There is no variant for arbitrary patch text, so a *proposed* diff (the plan's
-per-commit diff) cannot be shown in DiffPane. `DiffPane` already accepts raw
-patch text internally (`DiffPane.tsx:24`, `:589-596`), so only the union and one
-render branch are missing.
+- `staged` = `status.entries.filter(isStagedEntry)` (index column non-empty and
+  not `?`). Untracked `??` is **not** staged, matching the built-in button.
+- `worktree` = GitLens' `selectedWorktree`; `repoRoot` = `status.root`.
+- `refresh()` re-runs GitLens' status/branch/log refresh after our action writes
+  to git.
 
-**Requested contract:**
+### B. Elsewhere (own tab / command) — a point-in-time read
 
 ```ts
-// src/client/state.ts
-| { kind: 'proposed'; id: string; title: string; patch: string }
+const target = ctx.betterSidebar.getGitCommitTarget({ sessionId })
 ```
 
-- Render through the existing `parseUnifiedDiff` / `DiffFiles` stack.
-- Callers use the existing seed API: `openTab({ type: 'diff', id, title, diff: { kind: 'proposed', ... } })`.
-- Gate on a new `'planDiff'` feature string.
+⚠️ **Non-reactive by design**: publishing a target does **not** fire
+`subscribe()` (GitLens publishes on render, so notifying would create a
+publish → notify → re-render → publish loop). A consumer that must follow the
+user switching worktrees should re-read on its own `subscribeState`/poll, or
+simply render inside the commit row and take the props.
 
-## What is NOT requested
+## 3. Opening a proposed (plan) diff
 
-- No change to DSH core, ever.
-- No new chat input, no second transcript: the dedicated session uses the native
-  chat and the native composer.
-- No exposure of `DiffPane` internals, and no new `/sidebar/api` route for this
-  plugin's backend. The agent plugin owns its own business API and persistence.
+```ts
+ctx.betterSidebar.openTab({
+  type: 'diff',
+  id: `plan:${planId}:${i}`,
+  title: `计划第 ${i + 1} 个提交`,
+  diff: { kind: 'proposed', id: `plan:${planId}:${i}`, title: '…', patch: unifiedPatch },
+})
+```
 
-## Interim behaviour (already implemented, no better-sidebar change)
+- `patch` goes through the existing `parseUnifiedDiff` / `DiffFiles` stack —
+  same colouring, inline highlighting and stats as `worktree` / `commit` — and
+  triggers **no git call**.
+- Context folding passes `undefined` for `resolveFold` (no revision to read);
+  `DiffFiles` has a pre-existing degraded display for that.
+- `worktree` / `repoRoot` are display metadata only.
+- In the native right sidebar the host mints the tab id; the seed `id` only
+  affects the synthetic tab passed to `onOpen`. In the bottom workbench the seed
+  `id` dedupes as before. `type === 'diff'` tabs are dropped by
+  `sanitizeState`, so no new persistence work was needed.
 
-Without PR #1/#2 the flow is still usable end to end:
+## 4. Deviations we must absorb on our side
 
-- the dedicated session is created and driven by the plugin's own API
-  (`startDedicatedSession`), reachable from any command surface;
-- plan preview and approval are rendered from the tool results
-  (`commit_agent_publish_plan` returns per-commit trees and diffs), which the
-  host renders through the keyed `tool.call.toolview` slot;
-- `commit_agent_diff` returns the same patch text the DiffPane seam would show.
+1. **No `title` / `icon` on the descriptor.** The host renders our `component`
+   and nothing else; those fields would have been dead API. Our component owns
+   its own label and icon.
+2. **No `setGitCommitStatus`.** Status display stays inside our component; the
+   host does not store consumer business state.
+3. **Business state, persistence, dedicated-session creation and approval
+   binding stay with us.** better-sidebar explicitly declined to duplicate them —
+   which matches our own boundary in `PLAN.md` §3.
+4. **"Return to source session" needs no better-sidebar change**: our component
+   calls the host's `ctx.sessions.open?.(sessionId)`.
+5. **The per-target status/announce seam from our draft is not delivered**; we
+   render live status inline in our own action component instead.
+
+## 5. Verification performed by the better-sidebar workspace
+
+| Command | Result |
+| --- | --- |
+| `pnpm typecheck` | green |
+| `pnpm exec eslint <changed files>` | 0 errors / 0 warnings |
+| `pnpm lint` (whole repo) | 1 **pre-existing** unrelated error (`docs/prototypes/gitgraph-lines/src/layout.ts:16`) |
+| `pnpm build` | complete (incl. client chunk) |
+| `pnpm check:consumer-types` | `OK: the client/service declaration surface is node-free and self-contained` |
+| focused regression (12 spec files incl. the two new ones) | 214/214 |
+| `pnpm test` (full) | 1410 passed / 9 skipped / 33 failed — all in `agent-pty`/`smoke` with `posix_spawnp failed`; reproduced identically on the pre-change baseline, so environment-only |
+
+New tests: `tests/git-commit-actions.spec.tsx` (6),
+`tests/diff-tab-proposed.spec.tsx` (2), `tests/service.spec.ts` (+6), plus a
+compile-time gate in `tests/consumer-types.ts`.
+
+## 6. Remaining work on our side (not done yet)
+
+The seams exist, but this plugin still ships **no client half**: there is no UI
+component calling `registerGitCommitAction`, and no code calling `openTab` with
+a `proposed` diff. Implementing that requires a bundled client entry
+(`dsh.client` platform web) in this package. Until then the flow is driven
+through the plugin's own business API (`startDedicatedSession`), and the plan
+preview is rendered from the `commit_agent_publish_plan` tool result.

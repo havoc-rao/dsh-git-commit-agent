@@ -30,7 +30,7 @@ GitLens entry ──▶ dedicated native session ──▶ status/diff analysis
 | P1 — interactive planning (no real commit) | **done**: dedicated session composition, status/diff/read tools, whole-file plans, versioning, exact preview, old-revision invalidation |
 | P2 — approval + execution loop | **done**: exact approval binding, executor, real add/commit, cancel, partial failure, hooks, reconciliation |
 | P3 — hunk-level splitting, chat approval protocol | not started (by design) |
-| GitLens button + DiffPane plan preview | **blocked on an additive better-sidebar PR** — contract in [`docs/BETTER-SIDEBAR-INTEGRATION.md`](docs/BETTER-SIDEBAR-INTEGRATION.md) |
+| GitLens button + DiffPane plan preview | better-sidebar seams **delivered** (`registerGitCommitAction`, `getGitCommitTarget`, `{kind:'proposed'}`) on `feat/git-commit-action-seam` @ `edf6837`; **this plugin's client UI is not implemented yet** — names and evidence in [`docs/BETTER-SIDEBAR-INTEGRATION.md`](docs/BETTER-SIDEBAR-INTEGRATION.md) |
 | Live DSH host integration | **compiled against the verified contract, not yet exercised on a running host** |
 
 49 automated tests pass against real, isolated git repositories (`npm test`).

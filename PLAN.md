@@ -283,7 +283,7 @@ git.commit-plan.cancel
 | P1 可交互规划 | 已完成 | `src/core/git/*`、`src/core/plan/validate.ts`、`materialize.ts`、`src/host/session.ts`、`src/host/tools.ts`；测试 `tests/snapshot.test.ts`、`tests/plan.test.ts`、`tests/tools.test.ts` |
 | P2 批准与执行闭环 | 已完成 | `src/core/plan/digest.ts`、`executor.ts`、`lock.ts`、`src/core/store/store.ts`；测试 `tests/execute.test.ts` |
 | P3 进阶拆分 | 未开始（原计划） | — |
-| GitLens 入口 / DiffPane 计划预览 | 阻塞：需 better-sidebar 增量 PR | 契约见 `docs/BETTER-SIDEBAR-INTEGRATION.md` |
+| GitLens 入口 / DiffPane 计划预览 | better-sidebar 侧接缝**已交付并实现**（`feat/git-commit-action-seam` @ `edf6837`）；本插件**客户端 UI 尚未实现** | 确切名字与证据见 `docs/BETTER-SIDEBAR-INTEGRATION.md` |
 | 真机宿主联调 | 未验证 | 本工作区无运行中的 DSH 宿主；原生接入仅按已核对契约编译，不宣称已验证 |
 
 测试：`npm test` → 49/49 通过（`node --test`，真实隔离 git 仓库）。
@@ -294,7 +294,7 @@ git.commit-plan.cancel
 2. **原生会话创建/导航**：`AgentRegistry.create({ sessionId, setup, meta.cwd })` 已核对；**聚焦输入框无公开 API**（偏差 1）；导航用 `ISessions.open` / `uiWorkspace.openSession`。
 3. **普通会话与子代理 origin**：必须创建**普通**会话（不设 `origin:'subagent'`），并设置 `meta.cwd`，否则冷会话在侧栏不可见。已按此实现。
 4. **消息/工具结果渲染槽**：`tool.call.toolview`（按工具名 keyed）为公开槽，plan 卡片第一版走该槽；任意 transcript 卡片需 ChatNode 三件套（P3）。
-5. **better-sidebar 扩展接缝**：GitLens 提交区为硬编码 JSX，无 slot；选中仓库/worktree 未公开；DiffPane 无 proposed diff 变体。已提出最小独立 PR 契约（不绕过权限）。
+5. **better-sidebar 扩展接缝**：原始核对（提交区硬编码、选中仓库/worktree 未公开、无 proposed diff）成立。已通过跨工作区委派由 better-sidebar 工作区落地：`registerGitCommitAction` / `getGitCommitActions` / `getGitCommitTarget` / `setGitCommitTarget`（internal）、feature `'gitCommitActions'` / `'planDiff'`、`SidebarDiffRef` 新增 `{kind:'proposed'}`。确切名字与行号见 `docs/BETTER-SIDEBAR-INTEGRATION.md`。遗留：本插件的客户端 UI 组件与 `openTab` 调用尚未实现。
 6. **原生输入不覆盖 composition/guard**：`setup` 在会话发布前安装 `restrict` + 末端 `guard`（fail-closed）。未在真机验证。
 7. **hooks/签名/临时 index/无首提交/异常退出**：hooks 与签名按用户配置运行（不加 `--no-verify`）；临时 index 用 `GIT_INDEX_FILE` + 私有临时目录；无首提交（unborn HEAD）已测试；异常退出用 `reconcilePlan` 对账。Windows 未验证。
 8. **存储/审批原子性/崩溃恢复**：原子写（临时文件 + rename）、append-only 版本、审批绑定 digest、执行前后对账均已实现并测试。
@@ -304,7 +304,7 @@ git.commit-plan.cancel
 1. **`dsh.plugin.json` 不存在**：核对显示该文件在 DSH checkout 中无任何契约。改用已核对的 `package.json.dsh.bundle.patch` + `cordis.patch.yml`。（better-sidebar 仍带该文件，视为其自身约定，未参照。）
 2. **“聚焦原生输入框”降级**：公开 API 不存在聚焦能力，也无原子草稿交换。降级为“打开会话 + `setDraft` 预置草稿”，来源会话草稿只能显式读后恢复。
 3. **计划卡片第一版不走自定义 transcript 节点**：改为 keyed `tool.call.toolview` + 工具结果携带 planId/revision/digest。ChatNode 卡片列为 P3。
-4. **better-sidebar 不作为依赖**：插件不 import better-sidebar 任何代码，入口通过自有业务 API 提供；GitLens 按钮需对方增量 PR。
+4. **better-sidebar 不作为运行时依赖**：插件不 import better-sidebar 任何代码，入口通过自有业务 API 提供；GitLens 按钮通过对方新交付的 `registerGitCommitAction` 接入。对方明确退回的边界（业务状态、持久化、专用会话创建、审批绑定）本插件自行承担，与 §3 一致。对方同时**去掉了 descriptor 的 `title`/`icon`**、未实现 `setGitCommitStatus`，且 `getGitCommitTarget` 故意非响应式——本插件组件需自持文案/图标与状态展示。
 5. **工具定义不走 `defineTool` DSL**：为消除对 `@deepseek-ai/dsh-tools` 的编译期依赖，直接构造宿主 `register` 要求的 `ToolDefinition`（原始 JSON Schema + `render`）。契约等价。
 6. **`followup` 的 `UserMessage` 形状未核对**：P0 未记录其字段，当前发送 `{ text }`，首次真机挂载需确认（`src/host/session.ts` 已标注）。
 7. **末端 guard 的 `ToolExecution` 字段未核对**：guard 在无法读出工具名时**拒绝**（fail-closed），不假设字段名。
@@ -312,8 +312,9 @@ git.commit-plan.cancel
 
 ### 13.4 已知限制与后续步骤
 
-- 真机联调：在运行中的 DSH 宿主上挂载、创建专用会话、跑通一次真实提交与一次 hook 拒绝。
-- better-sidebar PR #1/#2（契约已给），落地 GitLens 按钮与计划 diff 预览。
+- 真机联调：在运行中的 DSH 宿主上挂载、创建专用会话、跑通一次真实提交与一次 hook 拒绝（同时确认 `UserMessage` 与 `ToolExecution` 形状）。
+- **本插件客户端 UI（下一步首要）**：新增自带 `dsh.client`（platform web）的客户端入口，用 `registerGitCommitAction` 挂"规划并提交变更"按钮（组件内自绘 icon/文案与 inline 状态），用 `openTab({type:'diff', diff:{kind:'proposed', …}})` 展示计划 diff；`ctx.sessions.open?.(sessionId)` 做"返回来源会话"。不要引入 better-sidebar 的私有 React 组件。
+- better-sidebar 侧已交付分支 `feat/git-commit-action-seam` @ `edf6837`（本地未 push）：需要时由用户决定是否合并/发布。
 - P3：hunk 级分组、暂存区备份/重建、纯聊天审批协议。
 - Windows 换行/符号链接/权限位行为未验证。
 - 发布前：包名可用性、peer、客户端 bundle 与宿主版本要求核对。
