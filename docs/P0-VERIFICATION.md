@@ -6,6 +6,8 @@
   `packages/core/agent/package.json`, `packages/core/tools/package.json`,
   `packages/core/session/package.json` all agree)
 - Second reference (read-only): `/Users/havoc/Documents/Projects/tools/dsh-plugins/DSH-better-sidebar` @ `0.20.0`
+- Raw audit kept verbatim as primary evidence:
+  [`DSH-API-CONTRACT-REPORT.md`](./DSH-API-CONTRACT-REPORT.md)
 
 Nothing in the DSH checkout or in `DSH-better-sidebar` was modified. Evidence is
 quoted from TypeScript **source** (`packages/**/src/**`); generated `lib/`/`dist`

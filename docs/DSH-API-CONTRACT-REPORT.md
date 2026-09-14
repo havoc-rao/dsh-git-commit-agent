@@ -1,3 +1,7 @@
+> Provenance: this is the raw read-only audit produced during the P0 pass against the
+> local DSH checkout (`0.1.5-rc.2`), kept verbatim as primary evidence. The consolidated,
+> decision-oriented summary is [`P0-VERIFICATION.md`](./P0-VERIFICATION.md).
+
 # DSH host-plugin API contract report (read-only verification)
 
 Checkout: `/Users/havoc/Documents/Projects/tools/deepseek-harness` (TS source only; no `lib/`/`dist/`).
