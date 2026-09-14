@@ -141,10 +141,38 @@ Run `npm test` (49 tests). Evidence per PLAN §11 acceptance item:
 
 ## 9. Explicitly not claimed
 
-- Live-host native-session integration is **compiled against the verified
-  contract but not exercised** in this workspace (no running DSH host). It is not
-  described as verified.
+- Native-session integration was **live-verified once** on 2026-09-14 (mount,
+  restricted tool surface, guard denial, session visibility, one real commit —
+  see `docs/P0-VERIFICATION.md` §7). `resume`, the web client, cancel/reconcile
+  and uninstall were **not** exercised live and are not described as verified.
 - A commit's hooks run with the user's privileges and can do anything the user
   configured. The plugin verifies the result and stops; it does not sandbox hooks.
 - `commit-tree` review: git objects are written during preview materialisation.
   The worktree, the real index and the refs are not modified during planning.
+
+## 10. Trust boundaries the live run made explicit
+
+These are properties of the Cordis/DSH trust model, not plugin defects, but they
+bound what "the user approved" means:
+
+1. **The business API is a process-global service.** `apply` publishes it with
+   `ctx.provide('gitCommitAgent', api)`, so any other in-process plugin can call
+   `approvePlan`, `withdrawApproval`, `executePlan` or `cancel`. The user-facing
+   approval is therefore a **UI boundary, not an in-process authorization
+   boundary**. The effective control is content binding: execution re-derives
+   `planDigest` from stored content and refuses unless
+   `approval.planDigest === plan.planDigest === recompute(plan)` and the plan has
+   no blockers. A caller can approve, but it cannot make the executor commit
+   something different from what the approval covers.
+2. **The eight tools are registered globally.** An unrelated session can see
+   `commit_agent_*`. Bounded risk again: planning never writes to the
+   repository, and execution requires an approval bound to a plan digest. Scoping
+   the tools to only the dedicated session would require registering them inside
+   the agent's own scope, which would then be *exempt from `restrict`* — the
+   terminal guard is what keeps the surface closed today.
+3. **`restrict` exempts the scope's own registrations.** Verified in the DSH
+   source and observed live. Our guard allow-lists by name and fails closed when
+   the name cannot be read, which is why the guard is not optional.
+4. **Uninstall must dispose.** `apply` wires `ctx.effect(() => () => { disposeTools(); plugin.dispose() })`
+   so the eight tools and any created session are released. Live uninstall was
+   not exercised.

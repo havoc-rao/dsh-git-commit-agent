@@ -44,13 +44,14 @@ export interface HostAgent {
 }
 
 /**
- * Tool execution context (`packages/core/tools/src/index.ts:397`). `cwd` is not
- * part of the verified contract, so it is optional and treated as a hint only.
+ * Tool execution context (`packages/core/tools/src/index.ts:397`).
+ *
+ * Verified on a live host: there is no `cwd` member, so the tools never read
+ * one. Only `agent` and `signal` are used.
  */
 export interface HostToolRunContext {
   readonly agent?: HostAgent
   readonly signal: { readonly aborted: boolean; throwIfAborted(): void }
-  readonly cwd?: string
 }
 
 /** Tool registry face (`tools.register` / `restrict` / `guard`). */
@@ -68,8 +69,14 @@ export interface HostScopedContext {
 /** Agent handle returned by `AgentRegistry.create` / `resume`. */
 export interface HostAgentHandle {
   readonly agent: HostAgent & {
-    followup(message: { readonly text: string } | string): void | Promise<void>
-    whenIdle?(): Promise<void>
+    /**
+     * Enqueue one user message. The argument is a complete `UserMessage`
+     * (`{ id, role: 'user', content, source }`, `packages/llm/llm/src/message.ts:131-145`);
+     * pass a factory-produced object, not `{ text }`.
+     */
+    followup(message: unknown): void | Promise<void>
+    /** Verified present and non-optional (`runtime-types.ts:191`). */
+    whenIdle(): Promise<void>
   }
   dispose(): Promise<void>
 }
@@ -117,14 +124,20 @@ export interface HostSessionsClient {
 /** Minimal Cordis plugin context face. */
 export interface HostPluginContext {
   readonly tools: HostToolRegistry
-  readonly agents?: HostAgentRegistry
-  readonly sessions?: unknown
+  /**
+   * Lazy service lookup. Unlike property access, `get` returns `undefined` for
+   * an unprovided service instead of throwing `cannot get property "X" without
+   * inject` (verified live: `vendor/cordis/src/reflect.ts:233-243`). The plugin
+   * uses it for `agents` so it still mounts on a host without an agent registry.
+   */
+  get?<T = unknown>(name: string): T | undefined
   readonly logger?: {
     info?(message: string, ...rest: unknown[]): void
     warn?(message: string, ...rest: unknown[]): void
     error?(message: string, ...rest: unknown[]): void
   }
-  effect?(fn: () => (() => void) | void): void
+  effect?(fn: () => (() => void) | void): unknown
+  provide?(name: string, value?: unknown): unknown
   on?(event: string, listener: (...args: unknown[]) => void): () => void
 }
 

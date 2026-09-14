@@ -31,9 +31,9 @@ GitLens entry ──▶ dedicated native session ──▶ status/diff analysis
 | P2 — approval + execution loop | **done**: exact approval binding, executor, real add/commit, cancel, partial failure, hooks, reconciliation |
 | P3 — hunk-level splitting, chat approval protocol | not started (by design) |
 | GitLens button + DiffPane plan preview | better-sidebar seams **delivered** (`registerGitCommitAction`, `getGitCommitTarget`, `{kind:'proposed'}`) on `feat/git-commit-action-seam` @ `edf6837`; **this plugin's client UI is not implemented yet** — names and evidence in [`docs/BETTER-SIDEBAR-INTEGRATION.md`](docs/BETTER-SIDEBAR-INTEGRATION.md) |
-| Live DSH host integration | **compiled against the verified contract, not yet exercised on a running host** |
+| Live DSH host integration | **verified once** on 2026-09-14 (headless profile, scratch `DSH_HOME`): mount, restricted tool surface, guard denial, session visibility and one real commit — see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §7. It found and fixed two blockers (missing lazy `agents` lookup; `followup` payload shape) |
 
-49 automated tests pass against real, isolated git repositories (`npm test`).
+59 automated tests pass against real, isolated git repositories (`npm test`).
 
 ## Install
 

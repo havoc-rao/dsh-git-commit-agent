@@ -535,13 +535,22 @@ export function restrictCommitAgentScope(agentCtx: HostScopedContext): () => voi
 }
 
 /**
- * Best-effort extraction of the tool name from a `ToolExecution` record.
- * Returns `null` when unknown, which the guard treats as a denial.
+ * Extract the tool name from a `ToolExecution` record.
+ *
+ * The verified field is `execution.name` (`packages/core/tools/src/index.ts:372-377`
+ * + `:307-331`); the other candidates are kept only as harmless fallbacks. A
+ * `null` result makes the guard deny, so an unfamiliar execution shape fails
+ * closed rather than open.
  */
 function toolNameOfExecution(execution: unknown): string | null {
   if (execution === null || typeof execution !== 'object') return null
   const record = execution as Record<string, unknown>
-  const candidates: unknown[] = [record['toolName'], record['name'], (record['tool'] as Record<string, unknown> | undefined)?.['name'], (record['definition'] as Record<string, unknown> | undefined)?.['name']]
+  const candidates: unknown[] = [
+    record['name'],
+    record['toolName'],
+    (record['tool'] as Record<string, unknown> | undefined)?.['name'],
+    (record['definition'] as Record<string, unknown> | undefined)?.['name'],
+  ]
   for (const candidate of candidates) {
     if (typeof candidate === 'string' && candidate !== '') return candidate
   }

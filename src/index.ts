@@ -28,6 +28,7 @@ import {
   requestInitialPlan,
   resumeDedicatedCommitSession,
   type DedicatedSession,
+  type UserMessageFactory,
 } from './host/session.js'
 import type { HostAgentRegistry, HostPluginContext, HostScopedContext } from './host/types.js'
 
@@ -122,7 +123,17 @@ export interface CommitAgentPlugin {
  * wiring services explicitly.
  */
 export function createCommitAgentPlugin(
-  options: CommitAgentConfig & { readonly agents?: HostAgentRegistry; readonly newSessionId?: () => string } = {},
+  options: CommitAgentConfig & {
+    readonly agents?: HostAgentRegistry
+    /**
+     * Lazy agent-registry lookup. Preferred over `agents`: it is resolved at
+     * call time, so the plugin does not depend on `ctx.agents` being injectable
+     * (or even present) at mount time.
+     */
+    readonly resolveAgents?: () => HostAgentRegistry | undefined
+    readonly newSessionId?: () => string
+    readonly createUserMessage?: UserMessageFactory
+  } = {},
 ): CommitAgentPlugin {
   const service = new CommitAgentService({
     dataDir: options.dataDir ?? defaultDataDir(),
@@ -132,10 +143,14 @@ export function createCommitAgentPlugin(
   const newSessionId = options.newSessionId ?? (() => `session-${randomUUID()}`)
 
   const requireAgents = (): HostAgentRegistry => {
-    if (options.agents === undefined) {
-      throw new GitCommitError('INTERNAL', 'the host has no agent registry available for git commit sessions')
+    const agents = options.resolveAgents?.() ?? options.agents
+    if (agents === undefined) {
+      throw new GitCommitError(
+        'INTERNAL',
+        'no agent registry is available: the host did not provide an "agents" service',
+      )
     }
-    return options.agents
+    return agents
   }
 
   const api: GitCommitAgentApi = {
@@ -193,7 +208,11 @@ export function createCommitAgentPlugin(
         indexEmpty: state.snapshot.indexEmpty,
         ...(input.userConstraints === undefined ? {} : { userConstraints: input.userConstraints }),
       })
-      await requestInitialPlan(session.handle, prompt)
+      await requestInitialPlan(
+        session.handle,
+        prompt,
+        ...(options.createUserMessage === undefined ? [] : [options.createUserMessage]),
+      )
       return { sessionId: session.sessionId, taskId: state.task.taskId, prompt }
     },
 
@@ -225,8 +244,27 @@ export function createCommitAgentPlugin(
 /** Mount the plugin: register tools and expose the business API on the context. */
 export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlugin {
   const options = (config ?? {}) as CommitAgentConfig
-  const agents = (ctx as unknown as { agents?: HostAgentRegistry }).agents
-  const plugin = createCommitAgentPlugin({ ...options, ...(agents === undefined ? {} : { agents }) })
+
+  /**
+   * Resolve a host service lazily.
+   *
+   * `ctx.agents` (property access) throws `cannot get property "agents" without
+   * inject` when `agents` is not declared in `inject` and its provider is a
+   * sibling row — verified on a live host, and it aborted the whole boot. `get`
+   * returns `undefined` instead (`vendor/cordis/src/reflect.ts:233-243`), which
+   * keeps this plugin mountable on hosts without an agent registry and removes
+   * any ordering dependency on the `agents` row.
+   */
+  const getService = <T>(name: string): T | undefined => {
+    const get = ctx.get
+    if (typeof get !== 'function') return undefined
+    return get.call(ctx, name) as T | undefined
+  }
+
+  const plugin = createCommitAgentPlugin({
+    ...options,
+    resolveAgents: () => getService<HostAgentRegistry>('agents'),
+  })
 
   const deps: ToolDependencies = {
     service: plugin.service,
@@ -241,8 +279,7 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
   }
 
   const disposeTools = registerCommitAgentTools(ctx, deps)
-  const provide = (ctx as unknown as { provide?: (key: string, value: unknown) => void }).provide
-  provide?.('gitCommitAgent', plugin.api)
+  if (typeof ctx.provide === 'function') ctx.provide('gitCommitAgent', plugin.api)
   ctx.logger?.info?.('dsh-git-commit-agent mounted')
 
   ctx.effect?.(() => () => {

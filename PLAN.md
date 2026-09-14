@@ -284,9 +284,10 @@ git.commit-plan.cancel
 | P2 批准与执行闭环 | 已完成 | `src/core/plan/digest.ts`、`executor.ts`、`lock.ts`、`src/core/store/store.ts`；测试 `tests/execute.test.ts` |
 | P3 进阶拆分 | 未开始（原计划） | — |
 | GitLens 入口 / DiffPane 计划预览 | better-sidebar 侧接缝**已交付并实现**（`feat/git-commit-action-seam` @ `edf6837`）；本插件**客户端 UI 尚未实现** | 确切名字与证据见 `docs/BETTER-SIDEBAR-INTEGRATION.md` |
-| 真机宿主联调 | 未验证 | 本工作区无运行中的 DSH 宿主；原生接入仅按已核对契约编译，不宣称已验证 |
+| 真机宿主联调 | **已完成一次**：mount / 受限工具面 / guard / 会话可见性 / 真实提交全部跑通；发现并修复 2 个阻断缺陷 | `docs/P0-VERIFICATION.md` §7 |
 
-测试：`npm test` → 49/49 通过（`node --test`，真实隔离 git 仓库）。
+测试：`npm test` → 59/59 通过（`node --test`，真实隔离 git 仓库）。
+真机联调在 scratch `DSH_HOME` 的 headless profile 中进行，未修改官方 checkout 或生成产物。
 
 ### 13.2 对 §10 待核对项的结论
 
@@ -312,7 +313,7 @@ git.commit-plan.cancel
 
 ### 13.4 已知限制与后续步骤
 
-- 真机联调：在运行中的 DSH 宿主上挂载、创建专用会话、跑通一次真实提交与一次 hook 拒绝（同时确认 `UserMessage` 与 `ToolExecution` 形状）。
+- **真机联调已完成一轮**（2026-09-14，scratch `DSH_HOME` headless profile）：原样 mount 曾因 `inject` 缺 `agents` 直接 boot 失败 → 改为 `ctx.get('agents')` 惰性解析；`followup({text})` 形状错误 → 改为完整 `UserMessage`。修复后 mount、restrict（33→8）、guard 拒绝、专用会话活/冷可见、`ctx.provide` 跨插件、status→publish→approve→execute 真实提交均实测通过。仍未实测：`resume`、web 客户端 `ISessions.open`、cancel/reconcile、卸载 disposal、并发、Windows（见 `docs/P0-VERIFICATION.md` §7）。
 - **本插件客户端 UI（下一步首要）**：新增自带 `dsh.client`（platform web）的客户端入口，用 `registerGitCommitAction` 挂"规划并提交变更"按钮（组件内自绘 icon/文案与 inline 状态），用 `openTab({type:'diff', diff:{kind:'proposed', …}})` 展示计划 diff；`ctx.sessions.open?.(sessionId)` 做"返回来源会话"。不要引入 better-sidebar 的私有 React 组件。
 - better-sidebar 侧已交付分支 `feat/git-commit-action-seam` @ `edf6837`（本地未 push）：需要时由用户决定是否合并/发布。
 - P3：hunk 级分组、暂存区备份/重建、纯聊天审批协议。

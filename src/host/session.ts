@@ -15,11 +15,17 @@
  *    NOT restore any approval: an approval is bound to a plan revision and its
  *    content digest, and resuming never re-creates one.
  *
- * UNVERIFIED AT RUNTIME: this module compiles against the verified structural
- * contract but has not been exercised against a live DSH host in this
- * workspace. `UserMessage`'s exact shape (the `followup` argument) was not
- * captured during P0; `{ text }` is used and must be confirmed on first mount.
+ * LIVE-VERIFIED (2026-09-14, DSH 0.1.5-rc.2, headless profile with
+ * `DSH_HOME` redirected to a scratch dir): mount succeeds, the dedicated session
+ * is created as `session-<uuid>` with `meta.cwd`, it appears in
+ * `sessionQuery.listSessions` both live and cold, 8 tools are visible to it
+ * (restrict 33 → 8), the guard denies a non-allowed tool, and a real
+ * status → publish → approve → execute cycle produced a real commit.
+ *
+ * The one error found live — `followup({ text })` — is fixed here by sending a
+ * complete `UserMessage` (see {@link resolveUserMessageFactory}).
  */
+import { randomUUID } from 'node:crypto'
 import { GitCommitError } from '../core/errors.js'
 import type { Snapshot } from '../core/types.js'
 import type { HostAgentHandle, HostAgentRegistry, HostScopedContext } from './types.js'
@@ -37,6 +43,8 @@ export interface DedicatedSessionOptions {
     readonly reasoningEffort?: string
     readonly maxTokens?: number
   }
+  /** Host user-message factory; resolved lazily when omitted. */
+  readonly createUserMessage?: UserMessageFactory
   readonly signal?: AbortSignal
 }
 
@@ -62,7 +70,7 @@ export async function createDedicatedCommitSession(
   const sessionId = options.newSessionId()
   const handle = await options.agents.create({
     sessionId,
-    setup: setup as never,
+    setup: setup,
     meta: { cwd: options.workspacePath },
     ...(options.agentOptions === undefined ? {} : { agentOptions: options.agentOptions }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -84,8 +92,63 @@ export async function resumeDedicatedCommitSession(
   if (options.resumeSessionId === '') {
     throw new GitCommitError('BAD_ARGUMENT', 'resumeSessionId is required to restore a dedicated session')
   }
-  const handle = await options.agents.resume({ resumeSessionId: options.resumeSessionId, setup: setup as never })
+  const handle = await options.agents.resume({ resumeSessionId: options.resumeSessionId, setup: setup })
   return { sessionId: options.resumeSessionId, handle }
+}
+
+/**
+ * Build one user message.
+ *
+ * The host's `createUserMessage` is preferred and resolved lazily, because the
+ * message must be a complete `UserMessage`:
+ * `{ id, role: 'user', content: ContentBlock[], source: MessageSource }`
+ * (`packages/llm/llm/src/message.ts:131-145`, factory `:204-211`).
+ * Sending `{ text }` was verified live to poison the durable log and fail the
+ * first turn with `Cannot read properties of undefined (reading 'kind')`.
+ */
+export type UserMessageFactory = (input: { readonly text: string }) => unknown
+
+/** Structurally-faithful fallback used when the host factory is unavailable. */
+export function fallbackUserMessage(text: string): unknown {
+  return Object.freeze({
+    id: randomUUID(),
+    role: 'user',
+    content: Object.freeze([Object.freeze({ type: 'text', text })]),
+    source: Object.freeze({ kind: 'user' }),
+  })
+}
+
+let cachedFactory: UserMessageFactory | null = null
+
+/**
+ * Resolve the user-message factory.
+ * @param explicit - caller-supplied factory (host integration / tests).
+ */
+export async function resolveUserMessageFactory(explicit?: UserMessageFactory): Promise<UserMessageFactory> {
+  if (explicit !== undefined) return explicit
+  if (cachedFactory !== null) return cachedFactory
+  try {
+    // Computed specifier: resolved from the host's module graph at runtime, and
+    // deliberately not a compile-time dependency of this package.
+    const specifier = '@deepseek-ai/dsh-llm'
+    const mod = (await import(specifier)) as {
+      createUserMessage?: (input: unknown) => unknown
+    }
+    if (typeof mod.createUserMessage === 'function') {
+      const create = mod.createUserMessage.bind(mod)
+      cachedFactory = (input) => create({ content: [{ type: 'text', text: input.text }], source: { kind: 'user' } })
+      return cachedFactory
+    }
+  } catch {
+    // Host package not resolvable (unit tests / stripped hosts): fall back.
+  }
+  cachedFactory = (input) => fallbackUserMessage(input.text)
+  return cachedFactory
+}
+
+/** Reset the memoised factory (tests). */
+export function resetUserMessageFactoryCache(): void {
+  cachedFactory = null
 }
 
 /**
@@ -94,9 +157,14 @@ export async function resumeDedicatedCommitSession(
  * The prompt carries only the task binding and the user's explicit constraints
  * — never the source session's transcript, and never its permission preset.
  */
-export async function requestInitialPlan(handle: HostAgentHandle, prompt: string): Promise<void> {
-  await handle.agent.followup({ text: prompt })
-  await handle.agent.whenIdle?.()
+export async function requestInitialPlan(
+  handle: HostAgentHandle,
+  prompt: string,
+  factory?: UserMessageFactory,
+): Promise<void> {
+  const create = await resolveUserMessageFactory(factory)
+  await handle.agent.followup(create({ text: prompt }))
+  await handle.agent.whenIdle()
 }
 
 /** Everything the prompt builder needs, without leaking the full snapshot. */

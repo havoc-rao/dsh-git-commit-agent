@@ -112,21 +112,102 @@ two-PR contract is specified in
 does **not** depend on better-sidebar, and it ships a command/API entry so the
 flow works without GitLens.
 
-## 6. Open items carried into implementation
+## 6. Open items — resolution status
 
-These are the parts the P0 pass could not confirm from source, and how the code
-behaves until they are confirmed on a live host:
+Items 1–4 were **resolved by a live mount** on 2026-09-14 (see §7). Items 5–6
+remain by design.
 
-1. **`UserMessage` shape** for `followup`. `src/host/session.ts` sends
-   `{ text }`; confirm and adjust on first mount.
-2. **`ToolExecution` shape** for the terminal guard. The guard is written
-   defensively and **denies** when the name cannot be read.
-3. **`ctx.provide` availability** for exposing the business API. `apply` calls it
-   through an optional member so a host without it still mounts; the returned
-   `plugin.api` is the supported fallback.
-4. **Live DSH host version beyond this checkout.** Not verified. The plugin
-   never imports host packages at runtime, so an incompatible member surfaces as
-   a coded error at the call site rather than a module-load crash.
-5. **Focus-the-composer** is impossible via public API; downgraded as described.
-6. **Client-side plan card / GitLens button rendering** are not implemented in
-   this package; the required seams are specified but not exercised.
+1. **`UserMessage` shape** — ✅ resolved. It must be a complete
+   `{ id, role: 'user', content: ContentBlock[], source: MessageSource }`
+   (`packages/llm/llm/src/message.ts:131-145`; factory `createUserMessage`
+   `:204-211`). Sending `{ text }` was reproduced live as a poisoned durable log
+   entry plus a first turn failing with
+   `Cannot read properties of undefined (reading 'kind')`.
+   `src/host/session.ts` now resolves `createUserMessage` lazily from
+   `@deepseek-ai/dsh-llm` and falls back to a structurally identical message.
+2. **`ToolExecution` shape** — ✅ resolved. The field is `execution.name`
+   (`packages/core/tools/src/index.ts:372-377` + `:307-331`). The guard read it
+   correctly live and denied a non-allowed tool with
+   `commit agent scope: todo_write is not permitted`.
+3. **`ctx.provide`** — ✅ resolved. `provide(name, value?)` exists
+   (`vendor/cordis/src/reflect.ts:44-46, 277-299`) and the API was retrieved by a
+   second plugin through `ctx.get('gitCommitAgent')`.
+4. **Mount-time service access** — ✅ resolved, and it was a **boot blocker**.
+   `ctx.agents` is a property proxy that throws
+   `cannot get property "agents" without inject` when `agents` is not declared in
+   `inject` and its provider is a sibling row
+   (`vendor/cordis/src/reflect.ts:136-171`). `apply` no longer reads it: it
+   resolves the registry lazily via `ctx.get('agents')`, which returns
+   `undefined` instead (`:233-243`). This also removes any ordering dependency.
+5. **Focus-the-composer** — remains impossible via public API; downgraded as
+   described in §4 and the deviation log in `PLAN.md` §13.3.
+6. **Client-side plan card / GitLens button rendering** — still not implemented
+   in this package. The better-sidebar seams now exist
+   (`docs/BETTER-SIDEBAR-INTEGRATION.md`), but no client entry has been written.
+
+## 7. Live mount verification (2026-09-14)
+
+Performed read-only against the DSH checkout by the `deepseek-harness` workspace
+session, with `DSH_HOME` redirected to a scratch directory so the real
+`~/.dsh` profile was untouched. No checkout file or generated artifact was
+modified.
+
+### Method
+
+```
+DSH_HOME=/tmp/<scratch> pnpm dsh plugin --profile headless add /abs/path/to/dsh-git-commit-agent
+DSH_HOME=/tmp/<scratch> pnpm dsh --profile headless --patch <overlay.yml>
+```
+
+An absolute path install is supported (it becomes a `link:` and the bundle patch
+is auto-reconciled), needs no network and no tarball, and the CLI accepts
+`--profile`, `--patch` and `--dump-config`. `DSH_HOME` is the documented
+redirect (`packages/util/home-paths/src/index.ts:18, 87`).
+
+### Result 1: the plugin as-written could not mount
+
+```
+Error: dsh: plugin tree failed to load: failed to apply loader entry include (cordis:include):
+failed to apply loader entry git-commit-agent (dsh-git-commit-agent): cannot get property "agents" without inject
+    at new apply (.../dsh-git-commit-agent/src/index.ts:228:69)
+```
+
+Fix applied: lazy `ctx.get('agents')` (see §6 item 4).
+
+### Result 2: everything else verified on the real host
+
+| Check | Observed |
+| --- | --- |
+| mount after the inject fix | succeeds; `ctx.get('gitCommitAgent')` resolves for another plugin |
+| tool registration | `tools.register` accepts our raw-JSON-Schema definitions; `output.schema` is enforced (`tools/index.ts:1782-1786`) |
+| `restrict` | the dedicated agent's visible surface went from 33 global tools to exactly 8 `commit_agent_*`; querying `bash`/`todo_write` reported `visible:false` |
+| `guard` | executing `todo_write` was denied with `commit agent scope: todo_write is not permitted` |
+| dedicated session | created as `session-<uuid>` with `meta.cwd`; present in `sessionQuery.listSessions` both live and cold (`live:false, persisted:true, cwd`) |
+| `ctx.provide` | a second plugin retrieved the API via `ctx.get('gitCommitAgent')`; `toolNames` length 8 |
+| `followup({text})` | **broken as reported above**; the turn ended with `Cannot read properties of undefined (reading 'kind')` |
+| real commit cycle | `commit_agent_status` → `commit_agent_publish_plan` (no blockers) → user-side `approvePlan` → `commit_agent_execute_plan` produced `outcome: completed` and commit `ab70c78` with a clean `git status` |
+
+`apply` returning the plugin object is **not** a defect: Cordis invokes
+`export function apply` via `new` and discards the return value
+(`vendor/cordis/src/utils.ts:79-90`, `fiber.ts:251-260`).
+
+### Not verified live
+
+`resume` (source-level only), the web client's `ISessions.open` (the web profile
+was not booted), user-rejected approval, cancel/reconcile, uninstall
+(`ctx.effect` disposal), concurrent sessions, and Windows.
+
+### Security observations from the live run
+
+1. `restrict` filters only the **inherited** surface; tools registered in the
+   scope's own registration set are exempt (`tools/index.ts:1127-1172`). Our
+   terminal `guard` still allow-lists by name, so this is not a bypass today —
+   but it is why the guard exists.
+2. `ctx.provide('gitCommitAgent', api)` publishes a **process-global** service.
+   Any in-process plugin can call `approvePlan`/`executePlan`. "The user
+   approved" is therefore a UI/UX boundary, not an in-process authorization
+   boundary; the *effective* control is that execution requires a stored
+   approval whose digest matches the stored plan content.
+3. The eight tools are registered as global tools, so an unrelated session can
+   also see them. The bounded risk is the same as (2): execution needs an
+   approval bound to a plan digest, and planning never writes to the repository.
