@@ -179,6 +179,9 @@ export function createCommitAgentPlugin(
 
     async startDedicatedSession(input) {
       const agents = requireAgents()
+      // Make sure the data directory is usable *before* creating a session, so
+      // a bad dataDir cannot leave an orphaned session behind.
+      await service.init()
       const setup = (agentCtx: HostScopedContext): void => {
         restrictCommitAgentScope(agentCtx)
       }
@@ -287,5 +290,10 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
     void plugin.dispose()
   })
 
+  // NOTE: Cordis invokes `export function apply` through `new` and discards the
+  // returned value, so returning the plugin is safe for embedders/tests. This
+  // relies on `apply` remaining a *function declaration*: an arrow function or
+  // method shorthand that returns an object would make Cordis treat the return
+  // value as an effect and fail with `Invalid effect`.
   return plugin
 }

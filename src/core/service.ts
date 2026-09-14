@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { GitCommitError, asGitCommitError } from './errors.js'
 import type {
   CommitTask,
@@ -28,9 +28,39 @@ import { materializePlan, treeDiff, type MaterializedStep } from './plan/materia
 import { normalizeAndValidatePlan, type PlanDraft, type ValidationLimits } from './plan/validate.js'
 import { CommitAgentStore, type StoredTask } from './store/store.js'
 
-/** Default plugin data directory (never inside a target repository). */
-export function defaultDataDir(): string {
-  return join(homedir(), '.dsh', 'git-commit-agent')
+/**
+ * Resolve the DSH user-data root.
+ *
+ * Mirrors `@deepseek-ai/dsh-home-paths` (`resolveDshHome`): an explicit
+ * configured path wins, then `$DSH_HOME` (blank/whitespace-only is treated as
+ * unset so a blank override never resolves to the cwd), then `~/.dsh`. The host
+ * package itself is not resolvable from a link-installed plugin, so the same
+ * precedence is implemented here — without it the plugin would ignore
+ * `DSH_HOME` and write into the user's real home.
+ *
+ * @param configured - explicit override (may start with `~`).
+ * @param env - environment mapping to read `DSH_HOME` from.
+ */
+export function resolveDshHome(
+  configured?: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const fromEnv = env['DSH_HOME']
+  const selected =
+    configured ?? (fromEnv !== undefined && fromEnv.trim().length > 0 ? fromEnv : join(homedir(), '.dsh'))
+  return resolve(expandHomePath(selected))
+}
+
+/** Expand a leading `~`, `~/` or `~\` against the OS home directory. */
+export function expandHomePath(path: string): string {
+  if (path === '~') return homedir()
+  if (path.startsWith('~/') || path.startsWith('~\\')) return join(homedir(), path.slice(2))
+  return path
+}
+
+/** Default plugin data directory: `$DSH_HOME/git-commit-agent` (never inside a target repository). */
+export function defaultDataDir(env: Record<string, string | undefined> = process.env): string {
+  return join(resolveDshHome(undefined, env), 'git-commit-agent')
 }
 
 /** Service construction options. */
@@ -118,9 +148,13 @@ export class CommitAgentService {
   private readonly locks: WorktreeLock
 
   constructor(options: ServiceOptions = {}) {
-    this.dataDir = options.dataDir ?? defaultDataDir()
+    this.dataDir = options.dataDir === undefined ? defaultDataDir() : resolveDshHome(options.dataDir)
     this.store = new CommitAgentStore(this.dataDir)
-    this.lockDir = options.lockDir === undefined ? join(this.dataDir, 'locks') : options.lockDir
+    this.lockDir = options.lockDir === undefined
+      ? join(this.dataDir, 'locks')
+      : options.lockDir === null
+        ? null
+        : resolveDshHome(options.lockDir)
     this.locks = new WorktreeLock(this.lockDir)
     this.validationLimits = options.validationLimits
     this.now = options.now ?? (() => new Date())

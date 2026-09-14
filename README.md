@@ -31,9 +31,21 @@ GitLens entry ──▶ dedicated native session ──▶ status/diff analysis
 | P2 — approval + execution loop | **done**: exact approval binding, executor, real add/commit, cancel, partial failure, hooks, reconciliation |
 | P3 — hunk-level splitting, chat approval protocol | not started (by design) |
 | GitLens button + DiffPane plan preview | better-sidebar seams **delivered** (`registerGitCommitAction`, `getGitCommitTarget`, `{kind:'proposed'}`) on `feat/git-commit-action-seam` @ `edf6837`; **this plugin's client UI is not implemented yet** — names and evidence in [`docs/BETTER-SIDEBAR-INTEGRATION.md`](docs/BETTER-SIDEBAR-INTEGRATION.md) |
-| Live DSH host integration | **verified once** on 2026-09-14 (headless profile, scratch `DSH_HOME`): mount, restricted tool surface, guard denial, session visibility and one real commit — see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §7. It found and fixed two blockers (missing lazy `agents` lookup; `followup` payload shape) |
+| Live DSH host integration | **verified twice** on 2026-09-14 (headless profile, scratch `DSH_HOME`): bare mount with `inject: ['tools']` only, restricted 8-tool surface, guard denial, session visibility, uninstall disposal and a real commit — see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §7. The two rounds found and fixed three defects (missing lazy `agents` lookup; `followup` payload shape; default `dataDir` ignoring `DSH_HOME`) |
 
-59 automated tests pass against real, isolated git repositories (`npm test`).
+65 automated tests pass against real, isolated git repositories (`npm test`).
+
+## Prerequisites
+
+- **A default model, or an explicit one.** The dedicated session drives a real
+  agent turn. Configure `agentOptions` in the cordis row, or make sure the
+  profile has a default model selected; otherwise the first turn ends at prompt
+  assembly with `prompt variable "{{model}}" has no value`.
+- **A writable data directory.** It defaults to `$DSH_HOME/git-commit-agent`
+  (`DSH_HOME` is respected; falls back to `~/.dsh/git-commit-agent`). Point
+  `config.dataDir` elsewhere if that is not writable — an unusable path fails
+  loudly as `DATA_DIR_UNAVAILABLE` before any session is created.
+- Session persistence, if you want `resume` to work after a restart.
 
 ## Install
 

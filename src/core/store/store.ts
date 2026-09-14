@@ -60,7 +60,17 @@ export class CommitAgentStore {
   async init(): Promise<void> {
     await this.mutex.run(async () => {
       if (this.loaded) return
-      await mkdir(dirname(this.file), { recursive: true })
+      try {
+        await mkdir(dirname(this.file), { recursive: true })
+      } catch (error) {
+        const cause = error as NodeJS.ErrnoException
+        throw new GitCommitError(
+          'DATA_DIR_UNAVAILABLE',
+          `cannot create the plugin data directory ${dirname(this.file)} (${cause.code ?? 'unknown'}); `
+          + 'set the plugin config option "dataDir" to a writable path',
+          { dataDir: dirname(this.file), cause: cause.code ?? null },
+        )
+      }
       try {
         const raw = await readFile(this.file, 'utf8')
         const parsed = JSON.parse(raw) as StoreDocument

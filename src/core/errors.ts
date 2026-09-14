@@ -31,6 +31,7 @@ export type GitCommitErrorCode =
   | 'TREE_MISMATCH'
   | 'COMMIT_UNEXPECTED'
   | 'BUDGET_EXCEEDED'
+  | 'DATA_DIR_UNAVAILABLE'
   | 'CANCELLED'
   | 'INTERNAL'
 

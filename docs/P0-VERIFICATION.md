@@ -211,3 +211,58 @@ was not booted), user-rejected approval, cancel/reconcile, uninstall
 3. The eight tools are registered as global tools, so an unrelated session can
    also see them. The bounded risk is the same as (2): execution needs an
    approval bound to a plan digest, and planning never writes to the repository.
+
+### 7.1 Post-fix re-verification (round 2)
+
+Re-run in the same harness session against commit `08ed392`, this time with **no
+shim at all** — the plugin's own `cordis.patch.yml` row, `inject: ['tools']`
+only. The overlay used in the second round only disabled the headless app and
+added an independent driver plugin; the second pass additionally set
+`config.dataDir` (configuration, not a code shim).
+
+| Check | Result |
+| --- | --- |
+| bare mount with `inject: ['tools']` only | ✅ succeeds; `boot.log` has no errors at all (previous round aborted at `cannot get property "agents" without inject`) |
+| which entry actually loads | `lib/src/index.js` (the earlier `src/index.ts:228` in the stack was a source-map projection) |
+| first user message shape | ✅ `inserted[0]` = `{ content: [{type:'text',text}], source: {kind:'user'}, role: 'user', id: '<uuid>' }`; driver assertions `hasId/roleUser/contentText/sourceUser` all true, `hasTextField` false |
+| the old `reading 'kind'` failure | ✅ gone (`kind-error-present: false`) |
+| full cycle through the agent's own tools | ✅ `commit_agent_status` → `commit_agent_publish_plan` → user-side `approvePlan` → `commit_agent_execute_plan`: `outcome: completed`, commit `f5c90db`, clean `git status` |
+| uninstall / disposal | ✅ `ctx.effect` disposer removes all 8 tools (global count 33 → 25), unpublishes `gitCommitAgent`, leaves no loader entry |
+| `restrict` | ✅ still exactly 8 tools; `bash`/`todo_write` report `visible: false` |
+| `guard` | ✅ still denies with `commit agent scope: todo_write is not permitted` |
+
+### 7.2 Findings from round 2
+
+1. **Fixed: the default data directory ignored `DSH_HOME`.** With no
+   `config.dataDir`, the plugin resolved `~/.dsh/git-commit-agent` and the mount
+   hit `EPERM: operation not permitted, mkdir '/Users/<user>/.dsh/git-commit-agent'`
+   even though `DSH_HOME` pointed at a scratch dir. `defaultDataDir()` now
+   mirrors `@deepseek-ai/dsh-home-paths#resolveDshHome` (explicit path →
+   `$DSH_HOME`, blank treated as unset → `~/.dsh`), explicit `dataDir`/`lockDir`
+   paths expand a leading `~`, an unusable directory now fails as
+   `DATA_DIR_UNAVAILABLE` with the path and a `dataDir` hint instead of a raw
+   `EPERM`, and `startDedicatedSession` validates the data directory *before*
+   creating a session so a bad path cannot orphan one.
+2. **The fallback message path is the only reachable one.** `@deepseek-ai/dsh-llm`
+   is **not resolvable from a link-installed plugin**
+   (`dsh-llm-resolvable-from-plugin: false`), so the lazy import never succeeds
+   and `fallbackUserMessage` is what actually runs. It was shape-validated on
+   the live host, which is why the turn now advances. Hosts that can supply the
+   factory may inject it via `config`/`createCommitAgentPlugin`, but YAML config
+   cannot carry a function, so the fallback is the practical production path.
+3. **A first turn still needs a host default model.** With no `agentOptions` and
+   no default model selected, the turn ends at prompt assembly with
+   `prompt variable "{{model}}" has no value for this assembly`. This is a host
+   configuration prerequisite, not a plugin defect: configure `agentOptions` in
+   the cordis row (or select a default model in the profile) before starting a
+   dedicated session.
+4. **`apply` returning the plugin object is safe but load-bearing.** Cordis
+   invokes `export function apply` through `new` and discards the return value;
+   this only holds while `apply` stays a function *declaration*. The source now
+   carries a comment saying so.
+
+### 7.3 Still not verified live
+
+`resume`, a model turn completing end to end (no API key in the verification
+environment), the web client's `ISessions.open`, cancel/reconcile, multi-session
+concurrency, and Windows.

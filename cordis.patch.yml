@@ -11,9 +11,15 @@
 # of the plugin row. `name` is the module specifier, which is the package name.
 #
 # `config` is optional; the defaults are:
-#   dataDir:      ~/.dsh/git-commit-agent   (tasks, plan revisions, approvals, executions)
-#   lockDir:      <dataDir>/locks           (cross-process execution lock; null disables it)
-#   agentOptions: omitted                   (host default model for the dedicated session)
+#   dataDir:      $DSH_HOME/git-commit-agent   (respects DSH_HOME, else ~/.dsh/git-commit-agent)
+#                 tasks, plan revisions, approvals and execution records live here.
+#                 An unusable path fails as DATA_DIR_UNAVAILABLE before any session exists.
+#   lockDir:      <dataDir>/locks              (cross-process execution lock; null disables it)
+#   agentOptions: omitted                      (host default model for the dedicated session)
+#
+# NOTE: the dedicated session runs a real agent turn, so the host needs either a
+# default model or an explicit `agentOptions` below; otherwise the first turn
+# ends at prompt assembly with `prompt variable "{{model}}" has no value`.
 #
 # Example with an explicit model for the dedicated commit session:
 #

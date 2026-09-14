@@ -284,9 +284,9 @@ git.commit-plan.cancel
 | P2 批准与执行闭环 | 已完成 | `src/core/plan/digest.ts`、`executor.ts`、`lock.ts`、`src/core/store/store.ts`；测试 `tests/execute.test.ts` |
 | P3 进阶拆分 | 未开始（原计划） | — |
 | GitLens 入口 / DiffPane 计划预览 | better-sidebar 侧接缝**已交付并实现**（`feat/git-commit-action-seam` @ `edf6837`）；本插件**客户端 UI 尚未实现** | 确切名字与证据见 `docs/BETTER-SIDEBAR-INTEGRATION.md` |
-| 真机宿主联调 | **已完成一次**：mount / 受限工具面 / guard / 会话可见性 / 真实提交全部跑通；发现并修复 2 个阻断缺陷 | `docs/P0-VERIFICATION.md` §7 |
+| 真机宿主联调 | **已完成两轮**：第一轮发现 2 个阻断缺陷并修复；第二轮原样挂载（无 shim）复验通过，并发现并修复第 3 个（dataDir 忽略 `DSH_HOME`） | `docs/P0-VERIFICATION.md` §7、§7.1 |
 
-测试：`npm test` → 59/59 通过（`node --test`，真实隔离 git 仓库）。
+测试：`npm test` → 65/65 通过（`node --test`，真实隔离 git 仓库）。
 真机联调在 scratch `DSH_HOME` 的 headless profile 中进行，未修改官方 checkout 或生成产物。
 
 ### 13.2 对 §10 待核对项的结论
