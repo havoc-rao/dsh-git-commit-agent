@@ -137,6 +137,34 @@ export interface HostSessionStore {
 }
 
 /**
+ * One Workspace entity (`packages/workspace/workspace/src/types.ts:31-96`).
+ *
+ * The sidebar groups Sessions by Workspace membership (`Workspace.sessionIds`),
+ * not by cwd; a Session created with only a `cwd` is never a member and falls
+ * into the Ungrouped bucket. `attachSession` is the host-side way to join one,
+ * and it validates that the Session's stored header cwd realpath-equals
+ * {@link path} (`entity.ts:124-152`).
+ */
+export interface HostWorkspace {
+  readonly id: string
+  /** Canonical (`realpath`) directory the Workspace owns. */
+  readonly path: string
+  attachSession(sessionId: string): Promise<void>
+}
+
+/**
+ * Workspace registry face (`ctx.workspaceRegistry`,
+ * `packages/workspace/workspace/src/index.ts:114`, `resolveByPath` `:276`).
+ *
+ * Optional on the host: a host booted without the workspace package has no
+ * registry, and grouping is then simply unavailable rather than fatal.
+ */
+export interface HostWorkspaceRegistry {
+  /** The Workspace whose canonical path equals this path, if any. */
+  resolveByPath(path: string): Promise<HostWorkspace | undefined>
+}
+
+/**
  * `ctx.userQuestions` (`packages/interaction/user-questions/src/index.ts:65-178`).
  *
  * `ask` is the host-owned human decision surface. The `plan-review` intent makes

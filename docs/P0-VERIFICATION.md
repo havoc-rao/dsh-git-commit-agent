@@ -78,6 +78,9 @@ verified contract is `package.json.dsh.bundle.patch` + `cordis.patch.yml`, so
 | Atomic draft swap/restore | **absent** | only read + `setDraft`; no atomic primitive |
 | Tool-result rendering slot for our tools | confirmed | `tool.call.toolview`, keyed by tool name, owner props include the result `block` (`ui-tool/src/client/contract/slots.ts:11-59`) |
 | Arbitrary transcript card (plan card) | confirmed | `ChatNodeDataMap` merge surface + `ctx.uiConversation.events.register(def)` + `conversation.chat.node` keyed renderer (`ui-chat/src/client/index.ts:54-61`, `contract/conversation.ts:185-245`) |
+| Session → Workspace grouping | confirmed | the tree resolves a group by `workspace.sessionIds.includes(sessionId)` and otherwise uses `UNGROUPED_KEY` (`ui-workspace/src/client/tree.ts:24-34`, `:201-243`) |
+| Attaching a session to a Workspace | confirmed | `session.create({ workspaceId })` → `workspace.attachSession`; the `{ cwd }` branch never attaches (`api/session-controller/src/commands.ts:87-126`); membership requires the stored header cwd to realpath-equal `workspace.path` (`workspace/workspace/src/entity.ts:124-152`) |
+| Host-side Workspace resolution | confirmed | `ctx.workspaceRegistry.resolveByPath(path)` (`workspace/workspace/src/index.ts:276-282`), registry service name `workspaceRegistry` (`:114`) |
 
 **Design consequences.**
 - The plan preview/approval card can be rendered **without touching DSH core**:
@@ -91,6 +94,13 @@ verified contract is `package.json.dsh.bundle.patch` + `cordis.patch.yml`, so
 - Draft preservation for the source session cannot be atomic; the entry must
   read-then-restore explicitly. Recorded as a limitation, not implemented in
   the plugin core (it belongs to the GitLens entry integration).
+- Session grouping is **Workspace membership, not cwd**. A `{ cwd }`-only
+  session is listed under **未分组** even when the cwd is a registered Workspace.
+  The client half therefore reads `ctx.workspaces.list.getSnapshot().items` and
+  passes the matching `workspaceId`; the host dedicated-session path attaches
+  through `ctx.workspaceRegistry`. A linked worktree that is not its own
+  Workspace cannot be attached (cwd must equal the Workspace path), so it stays
+  ungrouped — a DSH domain limit, not a plugin defect.
 
 ## 5. better-sidebar extension seams
 

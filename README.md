@@ -33,7 +33,7 @@ GitLens entry ──▶ dedicated native session ──▶ status/diff analysis
 | GitLens button + DiffPane plan preview | **implemented** in `client/client.js` against the delivered better-sidebar seams; the boot graph carries the entry and the bundle is served — the browser render itself is not yet verified (see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §8.7) |
 | Live DSH host integration | **verified twice** on 2026-09-14 (headless profile, scratch `DSH_HOME`): bare mount with `inject: ['tools']` only, restricted 8-tool surface, guard denial, session visibility, uninstall disposal and a real commit — see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §7. The two rounds found and fixed three defects (missing lazy `agents` lookup; `followup` payload shape; default `dataDir` ignoring `DSH_HOME`) |
 
-82 automated tests pass against real, isolated git repositories (`npm test`).
+89 automated tests pass against real, isolated git repositories (`npm test`).
 
 ## Prerequisites
 
@@ -98,6 +98,26 @@ selected worktree, seeds the planning request and submits it.
 
 **From any chat session** whose working directory is a git repository with
 pending changes, just ask the agent to plan the commits.
+
+### Session grouping (工作区归属)
+
+DSH's sidebar groups sessions by **Workspace membership**, not by working
+directory: the tree looks up the workspace whose `sessionIds` contains the
+session and otherwise drops it into the **未分组** (Ungrouped) bucket
+(`ui-workspace/src/client/tree.ts`). A session only joins a workspace when it is
+created *through* that workspace — the host attaches it in
+`SessionCommandController.create` solely for the `{ workspaceId }` branch; a
+`{ cwd }`-only session is never a member even when its cwd *is* a registered
+workspace.
+
+This plugin therefore resolves the target directory against the host's
+`workspaces` list and passes `workspaceId` when it matches, so the planning
+session appears under the original workspace. When the target is a linked git
+worktree that is not itself a registered workspace, the cwd cannot be attached
+(the host requires the session cwd to realpath-equal the workspace path), so the
+session stays ungrouped by design; register that worktree as a workspace to have
+it grouped. The host-side `startDedicatedSession` API does the same through
+`ctx.workspaceRegistry` / `workspace.attachSession`.
 
 Either way the flow is the same:
 
@@ -186,7 +206,7 @@ Full model: [`docs/SECURITY.md`](docs/SECURITY.md).
 
 ```sh
 npm install
-npm run verify     # typecheck + build + 49 tests against real isolated git repos
+npm run verify     # typecheck + build + 89 tests against real isolated git repos
 npm run build
 ```
 

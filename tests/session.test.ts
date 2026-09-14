@@ -114,6 +114,117 @@ test('startDedicatedSession fails with INTERNAL when no agents service exists', 
   await plugin.dispose()
 })
 
+/** A fake agent registry that returns one fixed dedicated session. */
+function fakeAgents(sessionId: string): HostAgentRegistry {
+  return {
+    async create() {
+      return {
+        agent: {
+          id: sessionId,
+          session: { id: sessionId },
+          followup: () => undefined,
+          whenIdle: async () => undefined,
+        },
+        dispose: async () => undefined,
+      }
+    },
+    async resume() {
+      throw new Error('not used')
+    },
+    get: () => undefined,
+  } as unknown as HostAgentRegistry
+}
+
+/** Start a dedicated session through `apply` with a recording workspace registry. */
+async function withWorkspaceRegistry(
+  dataDir: string,
+  workspaceRoot: string,
+  attach: (sessionId: string) => Promise<void>,
+  resolve: (path: string) => string | undefined,
+): Promise<string> {
+  const ctx = ctxWithThrowingAgents((name) => {
+    if (name === 'agents') return fakeAgents('session-dedicated')
+    if (name === 'workspaceRegistry') {
+      return {
+        async resolveByPath(path: string) {
+          const id = resolve(path)
+          return id === undefined ? undefined : { id, path: workspaceRoot, attachSession: attach }
+        },
+      }
+    }
+    return undefined
+  })
+  const plugin = apply(ctx, {
+    dataDir,
+    createUserMessage: ({ text }: { text: string }) => ({
+      id: 'm',
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+    }),
+  })
+  try {
+    const started = await plugin.api.startDedicatedSession({ workspacePath: workspaceRoot, sourceSessionId: null })
+    return started.sessionId
+  } finally {
+    await plugin.dispose()
+  }
+}
+
+test('startDedicatedSession attaches the new session to the owning workspace', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const attached: string[] = []
+    const sessionId = await withWorkspaceRegistry(
+      fixture.dataDir,
+      fixture.root,
+      async (id) => {
+        attached.push(id)
+      },
+      (path) => (path === fixture.root ? 'ws-1' : undefined),
+    )
+    assert.deepEqual(attached, [sessionId], 'the session must join the workspace so the sidebar groups it')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('startDedicatedSession succeeds when the workspace cannot be resolved', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const attached: string[] = []
+    const sessionId = await withWorkspaceRegistry(
+      fixture.dataDir,
+      fixture.root,
+      async (id) => {
+        attached.push(id)
+      },
+      () => undefined,
+    )
+    assert.match(sessionId, /^session-/)
+    assert.deepEqual(attached, [], 'an unregistered directory stays ungrouped without failing')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('a failing workspace attach never blocks session creation', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const sessionId = await withWorkspaceRegistry(
+      fixture.dataDir,
+      fixture.root,
+      async () => {
+        throw new Error('cannot attach session: cwd mismatch')
+      },
+      () => 'ws-1',
+    )
+    assert.match(sessionId, /^session-/)
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
 test('requestInitialPlan sends a complete UserMessage', async () => {
   const captured: unknown[] = []
   let idle = false

@@ -90,10 +90,51 @@ window.__ModuleLoader__.load({
       return ctx[name]
     }
 
+    /** Compare two directory strings, ignoring a trailing separator. */
+    function normalizePath(value) {
+      if (typeof value !== 'string' || value === '') return ''
+      return value.length > 1 ? value.replace(/\/+$/, '') : value
+    }
+
+    /**
+     * Resolve the registered Workspace that owns one directory.
+     *
+     * DSH's sidebar groups sessions strictly by **Workspace membership**
+     * (`workspace.sessionIds`), not by cwd: `session.create({ cwd })` records a
+     * session whose header points at that directory, but the session is only
+     * attached to a Workspace when `session.create({ workspaceId })` is used
+     * (the host's `SessionCommandController.create` calls
+     * `workspace.attachSession` only for that branch). A session with a cwd but
+     * no membership therefore falls into the "未分组" bucket even when its cwd
+     * *is* a registered Workspace. Passing the matching `workspaceId` is what
+     * puts the planning session back under the original workspace.
+     */
+    function workspaceIdForPath(ctx, path) {
+      const wanted = normalizePath(path)
+      if (wanted === '') return undefined
+      const workspaces = service(ctx, 'workspaces')
+      const list = workspaces && workspaces.list
+      const snapshot = list && typeof list.getSnapshot === 'function' ? list.getSnapshot() : undefined
+      const items = snapshot && Array.isArray(snapshot.items) ? snapshot.items : []
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index]
+        if (item && typeof item.path === 'string' && normalizePath(item.path) === wanted) {
+          return item.workspaceId
+        }
+      }
+      return undefined
+    }
+
     /**
      * Create a session in the target worktree, open it, and seed the planning
      * request. Uses only public client APIs; a missing conversation facade
      * degrades to a seeded draft the user submits themselves.
+     *
+     * When the target directory is a registered Workspace the session is
+     * created **through that Workspace** so the host attaches it and the
+     * sidebar groups it there; otherwise it is created with a plain `cwd` and
+     * stays under 未分组, which is unavoidable because the host only accepts a
+     * membership whose cwd equals the Workspace path exactly.
      */
     async function startPlanning(ctx, target) {
       const worktree = target.worktree || target.repoRoot
@@ -102,7 +143,20 @@ window.__ModuleLoader__.load({
       if (!sessions || typeof sessions.create !== 'function') {
         throw new Error('当前宿主没有可用的 sessions 服务')
       }
-      const sessionId = await sessions.create({ cwd: worktree })
+      const workspaceId = workspaceIdForPath(ctx, worktree)
+      let sessionId
+      if (workspaceId === undefined) {
+        sessionId = await sessions.create({ cwd: worktree })
+      } else {
+        try {
+          sessionId = await sessions.create({ workspaceId: workspaceId })
+        } catch (failure) {
+          // The Workspace may have been removed between the snapshot read and
+          // the call. A session in the right directory is still useful; it
+          // simply remains ungrouped.
+          sessionId = await sessions.create({ cwd: worktree })
+        }
+      }
       const workspace = service(ctx, 'uiWorkspace')
       if (workspace && typeof workspace.openSession === 'function') workspace.openSession(sessionId)
       else if (typeof sessions.open === 'function') sessions.open(sessionId)

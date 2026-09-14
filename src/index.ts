@@ -36,6 +36,7 @@ import type {
   HostScopedContext,
   HostSessionStore,
   HostUserQuestionService,
+  HostWorkspaceRegistry,
 } from './host/types.js'
 
 /** Plugin name, matching the cordis row and package name. */
@@ -139,6 +140,13 @@ export function createCommitAgentPlugin(
     readonly resolveAgents?: () => HostAgentRegistry | undefined
     readonly newSessionId?: () => string
     readonly createUserMessage?: UserMessageFactory
+    /**
+     * Best-effort host hook that attaches a freshly created session to the
+     * Workspace that owns `workspacePath`, so the sidebar groups it under the
+     * original workspace instead of the Ungrouped bucket. A missing registry or
+     * an unattachable path is a no-op; grouping must never fail session creation.
+     */
+    readonly attachWorkspaceSession?: (sessionId: string, workspacePath: string) => Promise<void>
   } = {},
 ): CommitAgentPlugin {
   const service = new CommitAgentService({
@@ -202,6 +210,13 @@ export function createCommitAgentPlugin(
         setup,
       )
       sessions.set(session.sessionId, session)
+      // Group the session under the Workspace that owns its directory. The
+      // sidebar groups by Workspace membership, not by cwd, so a session that is
+      // never attached lands in 未分组 even when its cwd is a registered
+      // Workspace. Grouping is cosmetic: a failure here must not block planning.
+      if (options.attachWorkspaceSession !== undefined) {
+        await options.attachWorkspaceSession(session.sessionId, input.workspacePath).catch(() => undefined)
+      }
       const state = await service.openTask({
         sourceSessionId: input.sourceSessionId,
         agentSessionId: session.sessionId,
@@ -273,6 +288,26 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
   const plugin = createCommitAgentPlugin({
     ...options,
     resolveAgents: () => getService<HostAgentRegistry>('agents'),
+    /**
+     * Attach a newly created dedicated session to the Workspace that owns its
+     * directory. Without this the session has a cwd but no Workspace
+     * membership, and the sidebar's workspace tree shows it under 未分组
+     * (`ui-workspace/src/client/tree.ts` `owningGroupKey`).
+     */
+    attachWorkspaceSession: async (sessionId, workspacePath) => {
+      const registry = getService<HostWorkspaceRegistry>('workspaceRegistry')
+      if (registry === undefined || typeof registry.resolveByPath !== 'function') return
+      const workspace = await registry.resolveByPath(workspacePath)
+      if (workspace === undefined || typeof workspace.attachSession !== 'function') return
+      try {
+        await workspace.attachSession(sessionId)
+      } catch (error) {
+        ctx.logger?.warn?.(
+          `dsh-git-commit-agent: session ${sessionId} stays ungrouped: `
+          + (error instanceof Error ? error.message : String(error)),
+        )
+      }
+    },
   })
 
   const deps: ToolDependencies = {

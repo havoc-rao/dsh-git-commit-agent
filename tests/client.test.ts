@@ -110,7 +110,15 @@ function findByType(node: unknown, type: string): Element | null {
 }
 
 /** A fake client context recording what the bundle registers. */
-function fakeCtx(options: { withSidebar?: boolean; features?: string[]; openTab?: boolean } = {}): {
+function fakeCtx(options: {
+  withSidebar?: boolean
+  features?: string[]
+  openTab?: boolean
+  /** Registered Workspaces the fake `workspaces` service reports. */
+  workspaces?: Array<{ workspaceId: string; path: string }>
+  /** Make `sessions.create({ workspaceId })` reject, like a vanished Workspace. */
+  failWorkspaceCreate?: boolean
+} = {}): {
   ctx: Record<string, unknown>
   actions: Array<Record<string, unknown>>
   toolviews: Array<{ key: string; component: (props: Record<string, unknown>) => unknown }>
@@ -144,6 +152,9 @@ function fakeCtx(options: { withSidebar?: boolean; features?: string[]; openTab?
   const services: Record<string, unknown> = {
     sessions: {
       async create(input: Record<string, unknown>) {
+        if (options.failWorkspaceCreate === true && input['workspaceId'] !== undefined) {
+          throw new Error('workspace/not-found')
+        }
         created.push(input)
         return 'session-created'
       },
@@ -154,6 +165,15 @@ function fakeCtx(options: { withSidebar?: boolean; features?: string[]; openTab?
         return { sessionId: 'session-created' }
       },
     },
+    workspaces: options.workspaces === undefined
+      ? undefined
+      : {
+          list: {
+            getSnapshot() {
+              return { items: options.workspaces }
+            },
+          },
+        },
     conversation: {
       input: {
         for() {
@@ -287,6 +307,75 @@ test('the button falls back to repoRoot when no worktree is selected', async () 
   ;(button?.props['onClick'] as () => void)()
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.deepEqual(harness.created, [{ cwd: '/primary' }])
+})
+
+test('a target inside a registered workspace creates the session through that workspace', async () => {
+  const { exports } = await loadBundle()
+  const harness = fakeCtx({ workspaces: [{ workspaceId: 'ws-1', path: '/repo' }] })
+  await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
+  const component = (harness.actions[0] as Record<string, unknown>)['component'] as (props: Record<string, unknown>) => unknown
+  const tree = component({
+    status: { isRepo: true },
+    staged: [{ path: 'a' }],
+    scope: { sessionId: 's' },
+    worktree: '/repo',
+    branch: 'main',
+  })
+  const button = findByType(tree, 'button')
+  ;(button?.props['onClick'] as () => void)()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  // `workspaceId` (not `cwd`) is what makes the host attach the session, which
+  // is what keeps it out of 未分组.
+  assert.deepEqual(harness.created, [{ workspaceId: 'ws-1' }])
+})
+
+test('a trailing separator still matches the registered workspace path', async () => {
+  const { exports } = await loadBundle()
+  const harness = fakeCtx({ workspaces: [{ workspaceId: 'ws-2', path: '/repo/' }] })
+  await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
+  const component = (harness.actions[0] as Record<string, unknown>)['component'] as (props: Record<string, unknown>) => unknown
+  const tree = component({ status: { isRepo: true }, staged: [{}], scope: { sessionId: 's' }, repoRoot: '/repo' })
+  const button = findByType(tree, 'button')
+  ;(button?.props['onClick'] as () => void)()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(harness.created, [{ workspaceId: 'ws-2' }])
+})
+
+test('a linked worktree outside every workspace stays a plain cwd session', async () => {
+  const { exports } = await loadBundle()
+  const harness = fakeCtx({ workspaces: [{ workspaceId: 'ws-1', path: '/repo' }] })
+  await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
+  const component = (harness.actions[0] as Record<string, unknown>)['component'] as (props: Record<string, unknown>) => unknown
+  const tree = component({
+    status: { isRepo: true },
+    staged: [{}],
+    scope: { sessionId: 's' },
+    repoRoot: '/repo',
+    worktree: '/repo-wt',
+  })
+  const button = findByType(tree, 'button')
+  ;(button?.props['onClick'] as () => void)()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  // A linked worktree path is not a Workspace path, so it cannot be attached
+  // (the host requires cwd === workspace path); the session still gets created.
+  assert.deepEqual(harness.created, [{ cwd: '/repo-wt' }])
+})
+
+test('a rejected workspace create falls back to a cwd session', async () => {
+  const { exports } = await loadBundle()
+  const harness = fakeCtx({
+    workspaces: [{ workspaceId: 'ws-1', path: '/repo' }],
+    failWorkspaceCreate: true,
+  })
+  await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
+  const component = (harness.actions[0] as Record<string, unknown>)['component'] as (props: Record<string, unknown>) => unknown
+  const tree = component({ status: { isRepo: true }, staged: [{}], scope: { sessionId: 's' }, worktree: '/repo' })
+  const button = findByType(tree, 'button')
+  ;(button?.props['onClick'] as () => void)()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual(harness.created, [{ cwd: '/repo' }])
 })
 
 test('a missing sidebar degrades to tools-only without throwing', async () => {
