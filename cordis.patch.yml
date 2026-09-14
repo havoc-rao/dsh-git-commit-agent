@@ -1,0 +1,34 @@
+# dsh-git-commit-agent bundle patch
+#
+# Verified DSH packaging contract (0.1.5-rc.2, packages/util/package-manifest):
+# a plugin that must be *mounted* is a Cordis plugin installed as a bundle. When
+# the package is added through the official CLI —
+#
+#   dsh plugin --profile <name> add dsh-git-commit-agent
+#
+# — the command reconciles `dsh.profile.bundles` against installed packages and,
+# seeing `dsh.bundle.patch` in package.json, merges THIS patch: a single insert
+# of the plugin row. `name` is the module specifier, which is the package name.
+#
+# `config` is optional; the defaults are:
+#   dataDir:      ~/.dsh/git-commit-agent   (tasks, plan revisions, approvals, executions)
+#   lockDir:      <dataDir>/locks           (cross-process execution lock; null disables it)
+#   agentOptions: omitted                   (host default model for the dedicated session)
+#
+# Example with an explicit model for the dedicated commit session:
+#
+#   - insert:
+#       - id: git-commit-agent
+#         name: 'dsh-git-commit-agent'
+#         config:
+#           dataDir: /Users/me/.dsh/git-commit-agent
+#           agentOptions:
+#             provider: anthropic
+#             model: claude-sonnet-4-5
+#
+# The plugin requires two host services: `tools` (hard) and `agents` (used when
+# a dedicated session is started; the session API throws a clear error when the
+# host has no agent registry). No host source file is modified by this package.
+- insert:
+    - id: git-commit-agent
+      name: 'dsh-git-commit-agent'

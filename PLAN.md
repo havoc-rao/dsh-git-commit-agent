@@ -1,6 +1,6 @@
 # DSH Git Commit Agent 插件设计计划
 
-- 状态：设计草案，尚未实施
+- 状态：P0 公开 API 已核对（见 `docs/P0-VERIFICATION.md`）；P1 与 P2 已实施并通过 49 项测试；**实施状态与设计偏差见 §13**
 - 日期：2026-09-14
 - 插件目录：`dsh-git-commit-agent`
 - 暂定包名：`dsh-git-commit-agent`（发布前核对命名与可用性）
@@ -272,3 +272,48 @@ git.commit-plan.cancel
 ## 12. 非目标
 
 第一版不做 push、历史重写、自动回滚已完成提交、自动跳过 hooks、自动修改代码修测试、任意 shell Agent 或跨仓库事务。不实现第二套 chatbox，不编辑 DSH 官方源码和 lib 生成产物。
+
+## 13. 实施状态与设计偏差（2026-09-14 落地）
+
+### 13.1 阶段完成度
+
+| 阶段 | 状态 | 证据 |
+| --- | --- | --- |
+| P0 接入验证 | 已完成（源码级） | `docs/P0-VERIFICATION.md`；核对基线 DSH `0.1.5-rc.2` + better-sidebar `0.20.0`，只读，未改动被参考仓库 |
+| P1 可交互规划 | 已完成 | `src/core/git/*`、`src/core/plan/validate.ts`、`materialize.ts`、`src/host/session.ts`、`src/host/tools.ts`；测试 `tests/snapshot.test.ts`、`tests/plan.test.ts`、`tests/tools.test.ts` |
+| P2 批准与执行闭环 | 已完成 | `src/core/plan/digest.ts`、`executor.ts`、`lock.ts`、`src/core/store/store.ts`；测试 `tests/execute.test.ts` |
+| P3 进阶拆分 | 未开始（原计划） | — |
+| GitLens 入口 / DiffPane 计划预览 | 阻塞：需 better-sidebar 增量 PR | 契约见 `docs/BETTER-SIDEBAR-INTEGRATION.md` |
+| 真机宿主联调 | 未验证 | 本工作区无运行中的 DSH 宿主；原生接入仅按已核对契约编译，不宣称已验证 |
+
+测试：`npm test` → 49/49 通过（`node --test`，真实隔离 git 仓库）。
+
+### 13.2 对 §10 待核对项的结论
+
+1. **已发布版本兼容性**：仅核对源码 `0.1.5-rc.2`，非 npm 发布兼容保证。插件运行时不 import 宿主包（全部为结构镜像），宿主成员缺失时以编码错误在调用点暴露，而非模块加载崩溃。
+2. **原生会话创建/导航**：`AgentRegistry.create({ sessionId, setup, meta.cwd })` 已核对；**聚焦输入框无公开 API**（偏差 1）；导航用 `ISessions.open` / `uiWorkspace.openSession`。
+3. **普通会话与子代理 origin**：必须创建**普通**会话（不设 `origin:'subagent'`），并设置 `meta.cwd`，否则冷会话在侧栏不可见。已按此实现。
+4. **消息/工具结果渲染槽**：`tool.call.toolview`（按工具名 keyed）为公开槽，plan 卡片第一版走该槽；任意 transcript 卡片需 ChatNode 三件套（P3）。
+5. **better-sidebar 扩展接缝**：GitLens 提交区为硬编码 JSX，无 slot；选中仓库/worktree 未公开；DiffPane 无 proposed diff 变体。已提出最小独立 PR 契约（不绕过权限）。
+6. **原生输入不覆盖 composition/guard**：`setup` 在会话发布前安装 `restrict` + 末端 `guard`（fail-closed）。未在真机验证。
+7. **hooks/签名/临时 index/无首提交/异常退出**：hooks 与签名按用户配置运行（不加 `--no-verify`）；临时 index 用 `GIT_INDEX_FILE` + 私有临时目录；无首提交（unborn HEAD）已测试；异常退出用 `reconcilePlan` 对账。Windows 未验证。
+8. **存储/审批原子性/崩溃恢复**：原子写（临时文件 + rename）、append-only 版本、审批绑定 digest、执行前后对账均已实现并测试。
+
+### 13.3 设计偏差（必须记录）
+
+1. **`dsh.plugin.json` 不存在**：核对显示该文件在 DSH checkout 中无任何契约。改用已核对的 `package.json.dsh.bundle.patch` + `cordis.patch.yml`。（better-sidebar 仍带该文件，视为其自身约定，未参照。）
+2. **“聚焦原生输入框”降级**：公开 API 不存在聚焦能力，也无原子草稿交换。降级为“打开会话 + `setDraft` 预置草稿”，来源会话草稿只能显式读后恢复。
+3. **计划卡片第一版不走自定义 transcript 节点**：改为 keyed `tool.call.toolview` + 工具结果携带 planId/revision/digest。ChatNode 卡片列为 P3。
+4. **better-sidebar 不作为依赖**：插件不 import better-sidebar 任何代码，入口通过自有业务 API 提供；GitLens 按钮需对方增量 PR。
+5. **工具定义不走 `defineTool` DSL**：为消除对 `@deepseek-ai/dsh-tools` 的编译期依赖，直接构造宿主 `register` 要求的 `ToolDefinition`（原始 JSON Schema + `render`）。契约等价。
+6. **`followup` 的 `UserMessage` 形状未核对**：P0 未记录其字段，当前发送 `{ text }`，首次真机挂载需确认（`src/host/session.ts` 已标注）。
+7. **末端 guard 的 `ToolExecution` 字段未核对**：guard 在无法读出工具名时**拒绝**（fail-closed），不假设字段名。
+8. **`materializePlan` 的 `baseTree` 语义修正**：reuse-index 策略下，首个提交的“父树”是 HEAD 树而非 index 树；空提交检测与预览 diff 均以此为准（原设计未区分，实现时修正）。
+
+### 13.4 已知限制与后续步骤
+
+- 真机联调：在运行中的 DSH 宿主上挂载、创建专用会话、跑通一次真实提交与一次 hook 拒绝。
+- better-sidebar PR #1/#2（契约已给），落地 GitLens 按钮与计划 diff 预览。
+- P3：hunk 级分组、暂存区备份/重建、纯聊天审批协议。
+- Windows 换行/符号链接/权限位行为未验证。
+- 发布前：包名可用性、peer、客户端 bundle 与宿主版本要求核对。
