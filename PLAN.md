@@ -283,10 +283,10 @@ git.commit-plan.cancel
 | P1 可交互规划 | 已完成 | `src/core/git/*`、`src/core/plan/validate.ts`、`materialize.ts`、`src/host/session.ts`、`src/host/tools.ts`；测试 `tests/snapshot.test.ts`、`tests/plan.test.ts`、`tests/tools.test.ts` |
 | P2 批准与执行闭环 | 已完成 | `src/core/plan/digest.ts`、`executor.ts`、`lock.ts`、`src/core/store/store.ts`；测试 `tests/execute.test.ts` |
 | P3 进阶拆分 | 未开始（原计划） | — |
-| GitLens 入口 / DiffPane 计划预览 | better-sidebar 侧接缝**已交付并实现**（`feat/git-commit-action-seam` @ `edf6837`）；本插件**客户端 UI 尚未实现** | 确切名字与证据见 `docs/BETTER-SIDEBAR-INTEGRATION.md` |
+| GitLens 入口 / DiffPane 计划预览 | **已实现**：`client/client.js`（手写 lazy-CJS）+ `dsh.client` 清单；真机 boot 已确认入口进入 `__DSH_BOOT__`、bundle 正常下发；浏览器内渲染尚未验证 | `docs/BETTER-SIDEBAR-INTEGRATION.md`、`docs/P0-VERIFICATION.md` §8.6-8.7 |
 | 真机宿主联调 | **已完成两轮**：第一轮发现 2 个阻断缺陷并修复；第二轮原样挂载（无 shim）复验通过，并发现并修复第 3 个（dataDir 忽略 `DSH_HOME`） | `docs/P0-VERIFICATION.md` §7、§7.1 |
 
-测试：`npm test` → 72/72 通过（`node --test`，真实隔离 git 仓库）。
+测试：`npm test` → 82/82 通过（`node --test`，真实隔离 git 仓库）。
 真机联调在 scratch `DSH_HOME` 的 headless profile 中进行，未修改官方 checkout 或生成产物。
 
 ### 13.2 对 §10 待核对项的结论
@@ -317,11 +317,12 @@ git.commit-plan.cancel
 ### 13.4 已知限制与后续步骤
 
 - **真机联调已完成一轮**（2026-09-14，scratch `DSH_HOME` headless profile）：原样 mount 曾因 `inject` 缺 `agents` 直接 boot 失败 → 改为 `ctx.get('agents')` 惰性解析；`followup({text})` 形状错误 → 改为完整 `UserMessage`。修复后 mount、restrict（33→8）、guard 拒绝、专用会话活/冷可见、`ctx.provide` 跨插件、status→publish→approve→execute 真实提交均实测通过。仍未实测：`resume`、web 客户端 `ISessions.open`、cancel/reconcile、卸载 disposal、并发、Windows（见 `docs/P0-VERIFICATION.md` §7）。
-- **本插件客户端 UI（下一步首要）**，已拆解为三部分（`docs/P0-VERIFICATION.md` §8）：
-  1. 自带 `dsh.client`（platform web + `./client` 导出）手写单文件 lazy-CJS（React 走 baseline `require('react')`，无需打包器）；用 `registerGitCommitAction` 挂"规划并提交变更"按钮，组件内自绘 icon/文案与 inline 状态。**无未知契约**。
-  2. `openTab({type:'diff', diff:{kind:'proposed', …}})` 展示计划 diff；补丁已随工具结果 `presentationMeta` 下发，**无需 remote**。
-  3. "创建专用会话"必须从浏览器触发宿主侧 `AgentRegistry.create`，因此需要一个 `@Remote`（`@deepseek-ai/dsh-typert-protocol` + `TypertRemoteService`，客户端 `ctx.remote.$mount` 且要求 strict codec）。**风险点**：插件需自带该依赖与 `@deepseek-ai/cordis` peer，插件副本与宿主 gateway 的 symbols 是否互通**未验证**，必须真机验证；若不通，退路是改为"向当前会话注入一条用户消息"来触发，不引入 remote。
-  另外不要把 better-sidebar 的私有 React 组件引入本包。
+- **客户端半边已落地**（`client/client.js` + `dsh.client`）：
+  1. `registerGitCommitAction` 按钮（id `dsh-git-commit-agent:plan-and-commit`，`available` 看 `status.isRepo`，无已暂存变更时禁用）；
+  2. keyed `tool.call.toolview` 计划卡片（逐提交"查看差异"→ `openTab({type:'diff', diff:{kind:'proposed'}})`）与审批结果卡片；
+  3. 启动路径**不用 `@Remote`**：`sessions.create({cwd: worktree})` → `openSession` → `conversation.input.for(scope).setDraft(prompt)` + `submit()`，全部是公开客户端 API，因而完全绕开了"插件自带 cordis 与宿主 gateway symbols 是否互通"的未验证风险。
+  代价：该会话是普通会话，agent 工具面不受 `restrict` 约束（宿主侧 `startDedicatedSession` + `restrict`/`guard` 的专用会话路径仍保留在业务 API 中）。真正的控制不变：执行必须匹配宿主侧记录的、按 digest 绑定的审批。
+- **仍需真机浏览器验证**：模块表 fetch/materialize 握手、按钮在 GitLens 提交行的实际渲染、`submit()` 在刚创建会话上是否被接受（草稿已设置，用户可直接回车）、better-sidebar 对 proposed diff 的渲染。
 - better-sidebar 侧已交付分支 `feat/git-commit-action-seam` @ `edf6837`（本地未 push）：需要时由用户决定是否合并/发布。
 - P3：hunk 级分组、暂存区备份/重建、纯聊天审批协议。
 - Windows 换行/符号链接/权限位行为未验证。

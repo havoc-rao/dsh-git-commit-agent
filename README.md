@@ -30,10 +30,10 @@ GitLens entry ──▶ dedicated native session ──▶ status/diff analysis
 | P1 — interactive planning (no real commit) | **done**: dedicated session composition, status/diff/read tools, whole-file plans, versioning, exact preview, old-revision invalidation |
 | P2 — approval + execution loop | **done**: exact approval binding, executor, real add/commit, cancel, partial failure, hooks, reconciliation |
 | P3 — hunk-level splitting, chat approval protocol | not started (by design) |
-| GitLens button + DiffPane plan preview | better-sidebar seams **delivered** (`registerGitCommitAction`, `getGitCommitTarget`, `{kind:'proposed'}`) on `feat/git-commit-action-seam` @ `edf6837`; **this plugin's client UI is not implemented yet** — names and evidence in [`docs/BETTER-SIDEBAR-INTEGRATION.md`](docs/BETTER-SIDEBAR-INTEGRATION.md) |
+| GitLens button + DiffPane plan preview | **implemented** in `client/client.js` against the delivered better-sidebar seams; the boot graph carries the entry and the bundle is served — the browser render itself is not yet verified (see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §8.7) |
 | Live DSH host integration | **verified twice** on 2026-09-14 (headless profile, scratch `DSH_HOME`): bare mount with `inject: ['tools']` only, restricted 8-tool surface, guard denial, session visibility, uninstall disposal and a real commit — see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §7. The two rounds found and fixed three defects (missing lazy `agents` lookup; `followup` payload shape; default `dataDir` ignoring `DSH_HOME`) |
 
-72 automated tests pass against real, isolated git repositories (`npm test`).
+82 automated tests pass against real, isolated git repositories (`npm test`).
 
 ## Prerequisites
 
@@ -90,19 +90,28 @@ approval. `approvedBy` is recorded as `user:plan-review` — an audit label, not
 cryptographic identity: DSH has no authenticated in-process user identity, and
 any in-process plugin can call the business API's `approvePlan` directly.
 
-## Trying it (before the GitLens button exists)
+## Trying it
 
-The plugin is usable from an ordinary chat session today:
+**From GitLens:** with pending changes, click **规划并提交变更** in the commit row
+(next to the built-in Commit button). The plugin opens a new session in the
+selected worktree, seeds the planning request and submits it.
 
-1. open a session whose working directory is a git repository with pending changes;
-2. ask the agent to plan the commits (it will call `commit_agent_status`, read the
-   diffs, and publish a plan);
-3. review the plan and approve it in the host's plan-review panel;
-4. the agent calls `commit_agent_execute_plan` and reports what landed.
+**From any chat session** whose working directory is a git repository with
+pending changes, just ask the agent to plan the commits.
 
-The GitLens commit-row button and the proposed-diff preview still require this
-plugin's client half; the better-sidebar seams for them are already delivered
-(see `docs/BETTER-SIDEBAR-INTEGRATION.md`).
+Either way the flow is the same:
+
+1. the agent calls `commit_agent_status`, reads the real diffs, and publishes a plan;
+2. the plan appears as a transcript card, and each commit can be opened as a
+   proposed diff in the sidebar's DiffPane;
+3. the agent calls `commit_agent_request_approval` and you decide in the host's
+   plan-review panel;
+4. only after your approval does the agent call `commit_agent_execute_plan`.
+
+The client half is one hand-written lazy-CJS file (`client/client.js`): no
+bundler, no JSX, no CSS modules, and no typert Remote — the button uses only
+public client APIs, so it adds no dependency on the host's internal symbol
+tables.
 
 ## Business API
 
@@ -126,6 +135,7 @@ never from the model. The model's tools cannot reach it.
 ## Architecture
 
 ```
+client/client.js              hand-written lazy-CJS browser half (button + plan cards)
 src/core/                     host-agnostic, fully testable
   errors.ts                   coded error taxonomy
   types.ts                    task / snapshot / plan / execution domain model

@@ -15,6 +15,9 @@
       "types": "./lib/src/index.d.ts",
       "default": "./lib/src/index.js"
     },
+    "./client": {
+      "default": "./client/client.js"
+    },
     "./core": {
       "types": "./lib/src/core/index.d.ts",
       "default": "./lib/src/core/index.js"
@@ -23,6 +26,7 @@
   },
   "files": [
     "lib/src",
+    "client",
     "cordis.patch.yml",
     "README.md",
     "PLAN.md"
@@ -30,6 +34,12 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "dsh-better-sidebar"
+      ]
     }
   },
   "scripts": {

@@ -343,3 +343,51 @@ The web shell was not booted (that would require building `apps/web`'s `lib/`,
 which the read-only constraint forbids), so the hand-written bundle, the
 `$mount` handshake and the button render are **unverified**; only the contracts
 above are source-verified.
+
+### 8.6 Implemented: the GitLens button and plan diff without a Remote
+
+The Remote risk in §8.2 was avoided entirely. `SessionInput` exposes both
+`setDraft(text)` and `submit(mode?)` (`packages/client/ui-conversation/src/client/contract/input.ts:198-211`),
+and `ISessions.create({ cwd })` is a public client API, so the button starts the
+work in three public client calls instead of a host round-trip:
+
+1. `ctx.sessions.create({ cwd: worktree ?? repoRoot })` — a new session in the
+   target worktree;
+2. `ctx.uiWorkspace.openSession(id)` (or `ctx.sessions.open(id)`);
+3. `ctx.conversation.input.for(ctx.sessions.scope(id)).setDraft(prompt)` then
+   `.submit()` — the planning request, with the tools' changeId discipline and
+   the "never claim the user approved" rule spelled out.
+
+This trades one designed property for reachability: the session is a normal one,
+so the agent's tool surface is not restricted to the nine commit tools (the
+dedicated host-created session with `restrict` + `guard` remains available
+through the business API). The control that matters is unchanged — execution
+still requires an approval recorded host-side against a plan digest.
+
+Delivered files:
+
+- `client/client.js` — one hand-written lazy-CJS file: `registerGitCommitAction`
+  (id `dsh-git-commit-agent:plan-and-commit`, `order: 50`, `available` gated on
+  `status.isRepo`, disabled while nothing is staged), plus keyed
+  `tool.call.toolview` cards for `commit_agent_publish_plan` (plan summary and a
+  per-commit "查看差异" button that opens a `{ kind: 'proposed' }` diff) and
+  `commit_agent_request_approval`;
+- `package.json` — `"./client"` export pointing straight at that file (no build
+  step) and `dsh.client = { platform: 'web', inject: ['dsh-better-sidebar'] }`.
+
+### 8.7 What the live boot confirmed, and what it did not
+
+Confirmed by booting a copy of the real `web` profile under a scratch `DSH_HOME`:
+
+| Check | Evidence |
+| --- | --- |
+| the manifest is accepted | clean boot; no "declares dsh.client but exports no ./client bundle" |
+| the entry composes into the graph | `window.__DSH_BOOT__` contains `{"id":"dsh-git-commit-agent","url":"/plugins/??dsh-git-commit-agent/client.js&rev=…","inject":["dsh-better-sidebar"]}`, ordered before `dsh-better-sidebar` |
+| the bundle is served | the combo URL returns HTTP 200 and 13.6 kB containing `window.__ModuleLoader__`, `registerGitCommitAction` and `commit_agent_request_approval` |
+| the client logic behaves | 10 Node tests drive the real bundle with a fake module table, fake React and a fake client ctx: registration shape, gating, session creation + draft seeding + submit, sidebar-absent degradation, feature-flag gating, plan card rendering, proposed-diff opening, approval card |
+
+**Not verified**: the browser render itself, the module table's fetch/materialize
+handshake, whether `submit()` is accepted on a freshly created session before the
+composer has mounted (the draft is set either way, so the user can press Enter),
+and better-sidebar's actual `openTab` rendering of the proposed diff. A real
+browser session is still required for those.

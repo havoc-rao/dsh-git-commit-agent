@@ -350,7 +350,21 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
       // model never sees this: it only receives `render`'s text projection.
       presentationMeta: (_args, value) => {
         const v = value as Record<string, unknown>
-        return (v['preview'] ?? null) as never
+        const plan = (v['plan'] as Record<string, unknown> | undefined) ?? {}
+        return {
+          taskId: v['taskId'] ?? null,
+          planId: plan['planId'] ?? null,
+          revision: plan['revision'] ?? null,
+          planDigest: plan['planDigest'] ?? null,
+          status: plan['status'] ?? null,
+          indexStrategy: plan['indexStrategy'] ?? null,
+          approved: plan['approved'] === true,
+          blockers: plan['blockers'] ?? [],
+          warnings: plan['warnings'] ?? [],
+          commits: plan['commits'] ?? [],
+          excludedChanges: plan['excludedChanges'] ?? [],
+          preview: v['preview'] ?? [],
+        } as never
       },
       render: textRender((v: Record<string, unknown>) => {
         const plan = (v['plan'] as Record<string, unknown> | undefined) ?? {}
