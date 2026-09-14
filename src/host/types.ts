@@ -48,6 +48,13 @@ export interface HostAgentSession {
 export interface HostAgent {
   readonly id: string
   readonly session: HostAgentSession
+  /**
+   * The agent's own scoped context. This is where per-session tools are
+   * registered (`agent.ctx.tools.register`) and where `restrict`/`guard` apply
+   * to exactly this agent. Optional in this structural mirror because the tool
+   * execution path never reads it — only the `agent/created` install path does.
+   */
+  readonly ctx?: HostScopedContext
 }
 
 /**
@@ -119,6 +126,11 @@ export interface HostAgentRegistry {
   create(options: HostCreateAgentOptions): Promise<HostAgentHandle>
   resume(options: HostResumeAgentOptions): Promise<HostAgentHandle>
   get(id: string): HostAgent | undefined
+  /**
+   * Every live agent, used at mount time to install tools into commit sessions
+   * that already exist (a plugin mounted after the first session).
+   */
+  list?(): readonly HostAgent[]
 }
 
 /** Client session controller face used for navigation (`ISessions`). */

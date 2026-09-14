@@ -17,28 +17,34 @@ import { createInitialisedFixture, git, writeFile } from './helpers/fixture.js'
 /** A fake host context recording everything the plugin touches. */
 function fakeHost(): {
   ctx: HostPluginContext
+  /** The scope an `agent/created` payload can carry. */
+  scope: { tools: unknown }
   registered: string[]
   disposed: string[]
   provided: Map<string, unknown>
   effects: number
+  emit: (event: string, payload: unknown) => void
   runEffects: () => void
 } {
   const registered: string[] = []
   const disposed: string[] = []
   const provided = new Map<string, unknown>()
   const effectFns: Array<() => void> = []
-  const ctx = {
-    tools: {
-      register(definition: HostToolDefinition) {
-        registered.push(definition.name)
-        return () => {
-          disposed.push(definition.name)
-        }
-      },
-      restrict: () => () => undefined,
-      guard: () => () => undefined,
+  const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
+  const tools = {
+    register(definition: HostToolDefinition) {
+      registered.push(definition.name)
+      return () => {
+        disposed.push(definition.name)
+      }
     },
-    logger: { info: () => undefined },
+    restrict: () => () => undefined,
+    guard: () => () => undefined,
+  }
+  const ctx = {
+    tools,
+    logger: { info: () => undefined, warn: () => undefined },
+    get: () => undefined,
     provide(key: string, value: unknown) {
       provided.set(key, value)
     },
@@ -46,14 +52,24 @@ function fakeHost(): {
       const disposer = fn()
       if (typeof disposer === 'function') effectFns.push(disposer)
     },
+    on(event: string, listener: (...args: unknown[]) => void) {
+      const existing = listeners.get(event) ?? []
+      existing.push(listener)
+      listeners.set(event, existing)
+      return () => undefined
+    },
   } as unknown as HostPluginContext
   return {
     ctx,
+    scope: { tools },
     registered,
     disposed,
     provided,
     get effects() {
       return effectFns.length
+    },
+    emit: (event, payload) => {
+      for (const listener of listeners.get(event) ?? []) listener(payload)
     },
     runEffects: () => {
       for (const fn of effectFns) fn()
@@ -67,12 +83,14 @@ test('the package entry exposes the Cordis plugin shape', () => {
   assert.equal(typeof apply, 'function')
 })
 
-test('apply() registers all eight tools, provides the API and wires the disposer', async () => {
+test('apply() installs the tools per commit session, provides the API and wires the disposer', async () => {
   const fixture = await createInitialisedFixture()
   try {
     const host = fakeHost()
     const plugin = apply(host.ctx, { dataDir: fixture.dataDir })
-    assert.deepEqual(host.registered, [...COMMIT_AGENT_TOOL_NAMES])
+
+    // Nothing is registered globally: an unrelated session must not see them.
+    assert.deepEqual(host.registered, [])
     assert.ok(host.provided.has('gitCommitAgent'), 'the business API should be provided on the context')
     assert.equal(host.effects, 1, 'a single disposer effect should be registered')
     assert.equal(plugin.api.toolNames.length, COMMIT_AGENT_TOOL_NAMES.length)
@@ -80,6 +98,19 @@ test('apply() registers all eight tools, provides the API and wires the disposer
     // The provided API is the same object the plugin returns.
     assert.equal(host.provided.get('gitCommitAgent'), plugin.api)
 
+    // An ordinary session (any other id) installs nothing.
+    host.emit('agent/created', {
+      agent: { id: 'session-unrelated', session: { id: 'session-unrelated' }, ctx: host.scope },
+    })
+    assert.deepEqual(host.registered, [])
+
+    // The reserved prefix is the contract for a button-created commit session.
+    host.emit('agent/created', {
+      agent: { id: 'session-git-commit-1', session: { id: 'session-git-commit-1' }, ctx: host.scope },
+    })
+    assert.deepEqual(host.registered, [...COMMIT_AGENT_TOOL_NAMES])
+
+    // Disposal releases exactly what that scope installed.
     host.runEffects()
     assert.deepEqual(host.disposed, [...COMMIT_AGENT_TOOL_NAMES].reverse())
     await plugin.dispose()

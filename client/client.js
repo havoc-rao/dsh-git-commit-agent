@@ -14,6 +14,9 @@
  * of `@deepseek-ai/cordis` whose symbol interop with the host gateway is
  * unverified. Instead the button uses only public client APIs: create a session
  * in the target worktree, open it, seed the planning prompt and submit it. The
+ * session id is preallocated with a reserved prefix (`SESSION_ID_PREFIX`) so the
+ * host half can install the commit tools into exactly that session's scope,
+ * instead of registering them globally where every session would see them. The
  * plugin's tools then drive planning, and approval goes through the host's own
  * plan-review panel.
  */
@@ -32,6 +35,18 @@ window.__ModuleLoader__.load({
     const PUBLISH_TOOL = 'commit_agent_publish_plan'
     const APPROVAL_TOOL = 'commit_agent_request_approval'
     const STYLE_ID = 'dsh-git-commit-agent/client.css'
+    /**
+     * Reserved session-id prefix the host half matches on.
+     *
+     * DSH resolves a tool surface per agent scope, so a globally registered
+     * tool would appear in every session. Instead the host installs the nine
+     * commit tools into exactly the agents whose id starts with this prefix,
+     * and this button preallocates such an id through
+     * `sessions.create({ sessionId })`.
+     * Kept in sync by hand with `src/host/tools.ts` (`COMMIT_AGENT_SESSION_PREFIX`);
+     * `tests/client.test.ts` locks the two together.
+     */
+    const SESSION_ID_PREFIX = 'session-git-commit-'
 
     const CSS = [
       '.dsh-gca-action{display:inline-flex;align-items:center;gap:6px}',
@@ -40,6 +55,8 @@ window.__ModuleLoader__.load({
       'color:inherit;font:inherit;font-size:12px;cursor:pointer}',
       '.dsh-gca-action button:hover:not(:disabled){background:var(--dsh-color-hover,rgba(127,127,127,.15))}',
       '.dsh-gca-action button:disabled{opacity:.5;cursor:default}',
+      '.dsh-gca-action button.dsh-gca-icon-button{padding:0;width:24px;justify-content:center}',
+      '.dsh-gca-action button.dsh-gca-icon-button svg{display:block}',
       '.dsh-gca-error{font-size:11px;color:var(--dsh-color-error,#f14c4c);max-width:220px}',
       '.dsh-gca-card{border:1px solid var(--dsh-color-border,#3c3c3c);border-radius:6px;padding:8px 10px;',
       'font-size:12px;line-height:1.5}',
@@ -97,6 +114,25 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Mint the session id the host recognizes as a commit session.
+     *
+     * `ISessions.create` accepts a preallocated `sessionId`, which is how a
+     * client-created session opts into the plugin's per-session tool surface.
+     * `crypto.randomUUID` exists in every secure context the web client runs
+     * in; the fallback keeps an older/embedded shell working.
+     */
+    function newSessionId() {
+      const uuid = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (char) {
+            const random = (Math.random() * 16) | 0
+            const value = char === 'x' ? random : (random & 0x3) | 0x8
+            return value.toString(16)
+          })
+      return SESSION_ID_PREFIX + uuid
+    }
+
+    /**
      * Resolve the registered Workspace that owns one directory.
      *
      * DSH's sidebar groups sessions strictly by **Workspace membership**
@@ -144,19 +180,23 @@ window.__ModuleLoader__.load({
         throw new Error('当前宿主没有可用的 sessions 服务')
       }
       const workspaceId = workspaceIdForPath(ctx, worktree)
+      // Preallocate the id so the host knows this is a commit session and
+      // installs the nine tools into exactly this agent's scope.
+      const requestedId = newSessionId()
       let sessionId
       if (workspaceId === undefined) {
-        sessionId = await sessions.create({ cwd: worktree })
+        sessionId = await sessions.create({ sessionId: requestedId, cwd: worktree })
       } else {
         try {
-          sessionId = await sessions.create({ workspaceId: workspaceId })
+          sessionId = await sessions.create({ sessionId: requestedId, workspaceId: workspaceId })
         } catch (failure) {
           // The Workspace may have been removed between the snapshot read and
           // the call. A session in the right directory is still useful; it
           // simply remains ungrouped.
-          sessionId = await sessions.create({ cwd: worktree })
+          sessionId = await sessions.create({ sessionId: requestedId, cwd: worktree })
         }
       }
+      if (typeof sessionId !== 'string' || sessionId === '') sessionId = requestedId
       const workspace = service(ctx, 'uiWorkspace')
       if (workspace && typeof workspace.openSession === 'function') workspace.openSession(sessionId)
       else if (typeof sessions.open === 'function') sessions.open(sessionId)
@@ -202,16 +242,49 @@ window.__ModuleLoader__.load({
           setBusy(false)
         })
       }
-      const label = busy ? '正在打开…' : '规划并提交变更'
-      const title = !isRepo
-        ? '当前不是 git 仓库'
-        : staged.length === 0
-          ? '没有已暂存的变更'
-          : '在新会话中规划这些变更的提交'
+      // The button is icon-only, so the tooltip and the accessible name carry
+      // the whole message, including why it is disabled.
+      const title = busy
+        ? '正在打开规划会话…'
+        : !isRepo
+          ? '当前不是 git 仓库'
+          : staged.length === 0
+            ? '没有已暂存的变更'
+            : '在新会话中规划并提交这些变更'
       return h(
         'div',
         { className: 'dsh-gca-action' },
-        h('button', { type: 'button', onClick: onClick, disabled: disabled, title: title }, label),
+        h(
+          'button',
+          {
+            type: 'button',
+            onClick: onClick,
+            disabled: disabled,
+            className: 'dsh-gca-icon-button',
+            title: title,
+            'aria-label': title,
+            'aria-busy': busy ? 'true' : undefined,
+          },
+          // The Git commit glyph: a commit node on the commit line. This button
+          // plans a sequence of commits, so it borrows that shape.
+          h(
+            'svg',
+            {
+              width: 14,
+              height: 14,
+              viewBox: '0 0 16 16',
+              fill: 'none',
+              stroke: 'currentColor',
+              strokeWidth: 1.5,
+              strokeLinecap: 'round',
+              'aria-hidden': 'true',
+              focusable: 'false',
+            },
+            h('line', { x1: 1, y1: 8, x2: 4.7, y2: 8 }),
+            h('circle', { cx: 8, cy: 8, r: 3.3 }),
+            h('line', { x1: 11.3, y1: 8, x2: 15, y2: 8 }),
+          ),
+        ),
         error !== null ? h('span', { className: 'dsh-gca-error' }, error) : null,
       )
     }

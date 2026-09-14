@@ -12,6 +12,7 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { COMMIT_AGENT_SESSION_PREFIX } from '../src/host/tools.js'
 
 /** Minimal element node produced by the fake React. */
 interface Element {
@@ -109,6 +110,28 @@ function findByType(node: unknown, type: string): Element | null {
   return found
 }
 
+/**
+ * Assert the button created exactly one commit session at the expected target.
+ *
+ * The host identifies a commit session by the reserved id prefix, so every
+ * creation must carry it — the same value the host half matches on.
+ */
+function assertCommitSession(
+  harness: { created: Array<Record<string, unknown>> },
+  expected: { cwd?: string; workspaceId?: string },
+): Record<string, unknown> {
+  assert.equal(harness.created.length, 1)
+  const input = harness.created[0] as Record<string, unknown>
+  assert.equal(input['cwd'], expected.cwd)
+  assert.equal(input['workspaceId'], expected.workspaceId)
+  assert.equal(typeof input['sessionId'], 'string')
+  assert.ok(
+    (input['sessionId'] as string).startsWith(COMMIT_AGENT_SESSION_PREFIX),
+    `session id ${String(input['sessionId'])} must carry the reserved prefix`,
+  )
+  return input
+}
+
 /** A fake client context recording what the bundle registers. */
 function fakeCtx(options: {
   withSidebar?: boolean
@@ -156,13 +179,14 @@ function fakeCtx(options: {
           throw new Error('workspace/not-found')
         }
         created.push(input)
-        return 'session-created'
+        const requested = input['sessionId']
+        return typeof requested === 'string' && requested !== '' ? requested : 'session-created'
       },
       open(id: string) {
         opened.push(id)
       },
-      scope() {
-        return { sessionId: 'session-created' }
+      scope(id: string) {
+        return { sessionId: id }
       },
     },
     workspaces: options.workspaces === undefined
@@ -288,8 +312,8 @@ test('clicking the button creates a session in the worktree, seeds the prompt an
   ;(button.props['onClick'] as () => void)()
   await new Promise((resolve) => setTimeout(resolve, 0))
 
-  assert.deepEqual(harness.created, [{ cwd: '/repo-wt' }])
-  assert.deepEqual(harness.opened, ['session-created'])
+  const createInput = assertCommitSession(harness, { cwd: '/repo-wt' })
+  assert.deepEqual(harness.opened, [createInput['sessionId']])
   assert.equal(harness.drafts.length, 1)
   assert.ok(harness.drafts[0]?.includes('/repo-wt'))
   assert.ok(harness.drafts[0]?.includes('commit_agent_request_approval'))
@@ -306,7 +330,7 @@ test('the button falls back to repoRoot when no worktree is selected', async () 
   const button = findByType(tree, 'button')
   ;(button?.props['onClick'] as () => void)()
   await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.deepEqual(harness.created, [{ cwd: '/primary' }])
+  assertCommitSession(harness, { cwd: '/primary' })
 })
 
 test('a target inside a registered workspace creates the session through that workspace', async () => {
@@ -327,7 +351,7 @@ test('a target inside a registered workspace creates the session through that wo
 
   // `workspaceId` (not `cwd`) is what makes the host attach the session, which
   // is what keeps it out of 未分组.
-  assert.deepEqual(harness.created, [{ workspaceId: 'ws-1' }])
+  assertCommitSession(harness, { workspaceId: 'ws-1' })
 })
 
 test('a trailing separator still matches the registered workspace path', async () => {
@@ -339,7 +363,7 @@ test('a trailing separator still matches the registered workspace path', async (
   const button = findByType(tree, 'button')
   ;(button?.props['onClick'] as () => void)()
   await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.deepEqual(harness.created, [{ workspaceId: 'ws-2' }])
+  assertCommitSession(harness, { workspaceId: 'ws-2' })
 })
 
 test('a linked worktree outside every workspace stays a plain cwd session', async () => {
@@ -360,7 +384,7 @@ test('a linked worktree outside every workspace stays a plain cwd session', asyn
 
   // A linked worktree path is not a Workspace path, so it cannot be attached
   // (the host requires cwd === workspace path); the session still gets created.
-  assert.deepEqual(harness.created, [{ cwd: '/repo-wt' }])
+  assertCommitSession(harness, { cwd: '/repo-wt' })
 })
 
 test('a rejected workspace create falls back to a cwd session', async () => {
@@ -375,7 +399,7 @@ test('a rejected workspace create falls back to a cwd session', async () => {
   const button = findByType(tree, 'button')
   ;(button?.props['onClick'] as () => void)()
   await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.deepEqual(harness.created, [{ cwd: '/repo' }])
+  assertCommitSession(harness, { cwd: '/repo' })
 })
 
 test('a missing sidebar degrades to tools-only without throwing', async () => {

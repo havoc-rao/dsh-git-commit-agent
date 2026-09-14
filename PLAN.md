@@ -320,8 +320,8 @@ git.commit-plan.cancel
 - **客户端半边已落地**（`client/client.js` + `dsh.client`）：
   1. `registerGitCommitAction` 按钮（id `dsh-git-commit-agent:plan-and-commit`，`available` 看 `status.isRepo`，无已暂存变更时禁用）；
   2. keyed `tool.call.toolview` 计划卡片（逐提交"查看差异"→ `openTab({type:'diff', diff:{kind:'proposed'}})`）与审批结果卡片；
-  3. 启动路径**不用 `@Remote`**：`sessions.create({cwd: worktree})` → `openSession` → `conversation.input.for(scope).setDraft(prompt)` + `submit()`，全部是公开客户端 API，因而完全绕开了"插件自带 cordis 与宿主 gateway symbols 是否互通"的未验证风险。
-  代价：该会话是普通会话，agent 工具面不受 `restrict` 约束（宿主侧 `startDedicatedSession` + `restrict`/`guard` 的专用会话路径仍保留在业务 API 中）。真正的控制不变：执行必须匹配宿主侧记录的、按 digest 绑定的审批。
+  3. 启动路径**不用 `@Remote`**：`sessions.create({sessionId, cwd: worktree})` → `openSession` → `conversation.input.for(scope).setDraft(prompt)` + `submit()`，全部是公开客户端 API，因而完全绕开了"插件自带 cordis 与宿主 gateway symbols 是否互通"的未验证风险。
+  工具注入按会话：客户端预分配 `session-git-commit-<uuid>` 的 `sessionId`，宿主半边在 `agent/created` 里只给该 agent scope 装 9 个工具 + `restrict({allow: []})` + 末端 `guard`；普通会话不再看到这些工具（宿主侧 `startDedicatedSession` 走同一条路径）。真正的控制不变：执行必须匹配宿主侧记录的、按 digest 绑定的审批。
 - **仍需真机浏览器验证**：模块表 fetch/materialize 握手、按钮在 GitLens 提交行的实际渲染、`submit()` 在刚创建会话上是否被接受（草稿已设置，用户可直接回车）、better-sidebar 对 proposed diff 的渲染。
 - better-sidebar 侧已交付分支 `feat/git-commit-action-seam` @ `edf6837`（本地未 push）：需要时由用户决定是否合并/发布。
 - P3：hunk 级分组、暂存区备份/重建、纯聊天审批协议。

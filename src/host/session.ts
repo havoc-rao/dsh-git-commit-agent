@@ -7,13 +7,18 @@
  *    `origin: 'subagent'`), because subagent-origin sessions are hidden from
  *    the ordinary sidebar tree. A normal session is listed, openable and
  *    cold-restorable through `ISessions`.
- *  - The session id is caller-supplied (`session-<uuid>`), because
- *    `AgentRegistry.create` requires it and returns it as the join key.
- *  - `setup` installs the restricted tool surface *before* the session is
- *    published, so the first prompt already runs with the guard in place.
- *  - `resume` re-runs `setup`, which reinstalls the same restrictions. It does
- *    NOT restore any approval: an approval is bound to a plan revision and its
- *    content digest, and resuming never re-creates one.
+ *  - The session id is caller-supplied (`session-git-commit-<uuid>` by the
+ *    plugin's default factory), because `AgentRegistry.create` requires it and
+ *    returns it as the join key — and because the reserved prefix is how the
+ *    host recognizes which agents get the nine tools.
+ *  - `setup` is optional here. The nine tools are installed by the plugin's
+ *    `agent/created` listener (matched by the reserved session-id prefix), so
+ *    this module only creates the session and delivers the first message; an
+ *    embedder that bypasses `apply` may still pass its own setup.
+ *  - `resume` re-registers the agent, which re-emits `agent/created`, so the
+ *    same tool installation happens again. It does NOT restore any approval: an
+ *    approval is bound to a plan revision and its content digest, and resuming
+ *    never re-creates one.
  *
  * LIVE-VERIFIED (2026-09-14, DSH 0.1.5-rc.2, headless profile with
  * `DSH_HOME` redirected to a scratch dir): mount succeeds, the dedicated session
@@ -65,12 +70,12 @@ export type DedicatedSetup = (agentCtx: HostScopedContext, agent: unknown) => vo
  */
 export async function createDedicatedCommitSession(
   options: DedicatedSessionOptions,
-  setup: DedicatedSetup,
+  setup?: DedicatedSetup,
 ): Promise<DedicatedSession> {
   const sessionId = options.newSessionId()
   const handle = await options.agents.create({
     sessionId,
-    setup: setup,
+    ...(setup === undefined ? {} : { setup }),
     meta: { cwd: options.workspacePath },
     ...(options.agentOptions === undefined ? {} : { agentOptions: options.agentOptions }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -87,12 +92,15 @@ export async function createDedicatedCommitSession(
  */
 export async function resumeDedicatedCommitSession(
   options: Omit<DedicatedSessionOptions, 'newSessionId' | 'workspacePath'> & { readonly resumeSessionId: string },
-  setup: DedicatedSetup,
+  setup?: DedicatedSetup,
 ): Promise<DedicatedSession> {
   if (options.resumeSessionId === '') {
     throw new GitCommitError('BAD_ARGUMENT', 'resumeSessionId is required to restore a dedicated session')
   }
-  const handle = await options.agents.resume({ resumeSessionId: options.resumeSessionId, setup: setup })
+  const handle = await options.agents.resume({
+    resumeSessionId: options.resumeSessionId,
+    ...(setup === undefined ? {} : { setup }),
+  })
   return { sessionId: options.resumeSessionId, handle }
 }
 

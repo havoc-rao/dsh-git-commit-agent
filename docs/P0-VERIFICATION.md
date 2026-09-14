@@ -218,9 +218,14 @@ was not booted), user-rejected approval, cancel/reconcile, uninstall
    approved" is therefore a UI/UX boundary, not an in-process authorization
    boundary; the *effective* control is that execution requires a stored
    approval whose digest matches the stored plan content.
-3. The eight tools are registered as global tools, so an unrelated session can
-   also see them. The bounded risk is the same as (2): execution needs an
+3. The eight tools were registered as global tools, so an unrelated session
+   could also see them. The bounded risk is the same as (2): execution needs an
    approval bound to a plan digest, and planning never writes to the repository.
+   **Superseded:** the plugin now installs the nine tools into a single commit
+   session's own agent scope (`installCommitAgentScope`, matched on the reserved
+   `session-git-commit-` session-id prefix), so no other session sees them.
+   `restrict({ allow: [] })` hides the inherited surface and the terminal guard
+   still allow-lists the nine.
 
 ### 7.1 Post-fix re-verification (round 2)
 
@@ -368,11 +373,18 @@ work in three public client calls instead of a host round-trip:
    `.submit()` — the planning request, with the tools' changeId discipline and
    the "never claim the user approved" rule spelled out.
 
-This trades one designed property for reachability: the session is a normal one,
+This traded one designed property for reachability: the session is a normal one,
 so the agent's tool surface is not restricted to the nine commit tools (the
 dedicated host-created session with `restrict` + `guard` remains available
 through the business API). The control that matters is unchanged — execution
 still requires an approval recorded host-side against a plan digest.
+
+**Superseded:** the trade is gone. The client now preallocates a reserved
+`session-git-commit-<uuid>` id through `sessions.create({ sessionId })`, and the
+host half installs the nine tools into exactly that agent's scope on
+`agent/created`. A plain chat session no longer sees the commit tools at all, so
+the `restrict({ allow: [] })` + `guard` surface is what the button session runs
+with too.
 
 Delivered files:
 

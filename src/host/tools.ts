@@ -15,7 +15,27 @@ import { asGitCommitError, GitCommitError, type GitCommitErrorCode } from '../co
 import type { CommitAgentService } from '../core/service.js'
 import { buildPlanReview } from '../core/review.js'
 import type { ChangeRecord, PlanVersion } from '../core/types.js'
-import type { ContentBlock, HostPluginContext, HostScopedContext, HostToolDefinition, HostToolRunContext, JsonSchemaNode } from './types.js'
+import type { ContentBlock, HostScopedContext, HostToolDefinition, HostToolRunContext, JsonSchemaNode } from './types.js'
+
+/**
+ * Reserved session-id prefix for the sessions this plugin owns.
+ *
+ * DSH decides tool scope from the registering context: a tool registered on the
+ * plugin's root context is visible to *every* session, while one registered on
+ * an agent's own `agent.ctx` is visible only to that agent. The GitLens button
+ * cannot create an agent host-side (that needs `AgentRegistry.create`), so it
+ * preallocates an id with this prefix through `ISessions.create({ sessionId })`
+ * and the host half installs the nine tools into exactly those agent scopes.
+ *
+ * Kept in sync by hand with `client/client.js` (the client bundle cannot import
+ * this module); `tests/client.test.ts` locks the two constants together.
+ */
+export const COMMIT_AGENT_SESSION_PREFIX = 'session-git-commit-'
+
+/** True when a session id belongs to a commit-agent session. */
+export function isCommitAgentSession(sessionId: string): boolean {
+  return sessionId.startsWith(COMMIT_AGENT_SESSION_PREFIX)
+}
 
 /** Every tool this plugin registers, in restriction order. */
 export const COMMIT_AGENT_TOOL_NAMES = [
@@ -652,31 +672,38 @@ export function isExposableCode(code: string): boolean {
 }
 
 /**
- * Register every tool on the host registry.
- * @returns a disposer that unregisters all of them.
- */
-export function registerCommitAgentTools(ctx: HostPluginContext, deps: ToolDependencies): () => void {
-  const disposers: Array<() => void> = []
-  for (const definition of buildCommitAgentTools(deps)) {
-    disposers.push(ctx.tools.register(definition))
-  }
-  return () => {
-    for (const dispose of disposers.reverse()) dispose()
-  }
-}
-
-/**
- * Confine a dedicated agent's scope to this plugin's tools.
+ * Install the nine tools into one agent's own scope.
  *
- * `restrict` intersects along the scope chain and exempts the scope's own
- * registrations, so a final `guard` is added as the terminal check. The guard
- * fails closed when it cannot determine the tool name from the execution
- * record.
+ * This is the ONLY place the tools become visible. Registering on the agent
+ * scope (rather than the plugin's root context) is what keeps them out of every
+ * unrelated session: the host resolves a tool surface per agent, and a scoped
+ * registration shadows a global one.
+ *
+ * The registration is paired with two guards so the surface stays closed even
+ * though scoped registrations are exempt from `restrict`:
+ *
+ *  - `restrict({ allow: [] })` filters the whole **inherited** surface (the
+ *    global layer plus every preset/standing ancestor layer) down to nothing.
+ *    An empty `allow` is valid — only `{}` with both sides undefined is
+ *    rejected — and it is why the nine do not have to be global: naming them in
+ *    `allow` would fail once they are no longer registered globally.
+ *  - the terminal `guard` allow-lists the nine by name and fails closed on an
+ *    execution record it cannot read.
+ *
+ * @param agentCtx - the target agent's scoped context (`agent.ctx`).
+ * @param definitions - the definitions built by {@link buildCommitAgentTools}.
+ * @returns a disposer that removes all three contributions in reverse.
  */
-export function restrictCommitAgentScope(agentCtx: HostScopedContext): () => void {
+export function installCommitAgentScope(
+  agentCtx: HostScopedContext,
+  definitions: readonly HostToolDefinition[],
+): () => void {
   const allowed = new Set<string>(COMMIT_AGENT_TOOL_NAMES)
   const disposers: Array<() => void> = []
-  disposers.push(agentCtx.tools.restrict({ allow: [...COMMIT_AGENT_TOOL_NAMES] }))
+  for (const definition of definitions) {
+    disposers.push(agentCtx.tools.register(definition))
+  }
+  disposers.push(agentCtx.tools.restrict({ allow: [] }))
   disposers.push(
     agentCtx.tools.guard((execution: unknown) => {
       const name = toolNameOfExecution(execution)

@@ -21,9 +21,12 @@ exact plan revision does.
   user's identity, hooks and signing behave exactly as in their own terminal.
 - Analysis never executes repository-supplied programs: hashing uses
   `git hash-object --no-filters`; diffs use `--no-ext-diff --no-textconv`.
-- The dedicated agent's scope is `restrict({ allow: <9 tools> })` plus a
-  terminal `guard` that **fails closed** if it cannot read the tool name from the
-  execution record (`restrictCommitAgentScope`).
+- The nine tools are installed into a commit session's own agent scope
+  (`installCommitAgentScope`): the scope's own registrations are the only visible
+  tools, `restrict({ allow: [] })` hides the whole inherited surface (global plus
+  every preset/standing ancestor layer), and a terminal `guard` allow-lists the
+  nine by name and **fails closed** if it cannot read the tool name from the
+  execution record.
 - Repository text and diffs are data. The system prompt says so explicitly.
 
 ## 2. Approval is bound to content, not to a button
@@ -164,15 +167,19 @@ bound what "the user approved" means:
    `approval.planDigest === plan.planDigest === recompute(plan)` and the plan has
    no blockers. A caller can approve, but it cannot make the executor commit
    something different from what the approval covers.
-2. **The nine tools are registered globally.** An unrelated session can see
-   `commit_agent_*`. Bounded risk again: planning never writes to the
-   repository, and execution requires an approval bound to a plan digest. Scoping
-   the tools to only the dedicated session would require registering them inside
-   the agent's own scope, which would then be *exempt from `restrict`* — the
-   terminal guard is what keeps the surface closed today.
+2. **The nine tools are scoped to commit sessions, not global.** `apply` never
+   registers them on its own context; it installs them on `agent/created` for
+   agents whose session id carries the reserved `session-git-commit-` prefix
+   (the GitLens button preallocates one through `ISessions.create`). An unrelated
+   session does not see them at all. The prefix is a naming contract, not an
+   authorization boundary — a session that forged it would gain planning tools,
+   but planning never writes to the repository and execution still requires an
+   approval bound to a plan digest.
 3. **`restrict` exempts the scope's own registrations.** Verified in the DSH
-   source and observed live. Our guard allow-lists by name and fails closed when
-   the name cannot be read, which is why the guard is not optional.
+   source and observed live. Because the nine are now the scope's own
+   registrations, the restriction is `allow: []` (hide everything inherited) and
+   the terminal guard is what keeps the surface closed. The guard is not
+   optional.
 4. **Uninstall must dispose.** `apply` wires `ctx.effect(() => () => { disposeTools(); plugin.dispose() })`
    so the nine tools and any created session are released. Live uninstall was
    not exercised.

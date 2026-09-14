@@ -2,9 +2,10 @@
  * dsh-git-commit-agent — host plugin entry.
  *
  * A Cordis plugin (`apply(ctx, config)`) that mounts the commit-agent service,
- * registers the restricted tool surface, and exposes a small business API other
- * plugins (for example the GitLens entry in DSH-better-sidebar) call to open a
- * task, approve one plan revision, execute it, or navigate to the session.
+ * installs the restricted tool surface into commit sessions only, and exposes a
+ * small business API other plugins (for example the GitLens entry in
+ * DSH-better-sidebar) call to open a task, approve one plan revision, execute
+ * it, or navigate to the session.
  *
  * Packaging follows the verified DSH contract: `package.json.dsh.bundle.patch`
  * plus a `cordis.patch.yml` insert row. There is no `dsh.plugin.json` contract
@@ -16,9 +17,11 @@ import type { PlanDraft } from './core/plan/validate.js'
 import type { ExecutionResult, PlanVersion, Snapshot } from './core/types.js'
 import { GitCommitError } from './core/errors.js'
 import {
+  buildCommitAgentTools,
+  COMMIT_AGENT_SESSION_PREFIX,
   COMMIT_AGENT_TOOL_NAMES,
-  registerCommitAgentTools,
-  restrictCommitAgentScope,
+  installCommitAgentScope,
+  isCommitAgentSession,
   type ToolDependencies,
 } from './host/tools.js'
 import {
@@ -31,9 +34,9 @@ import {
   type UserMessageFactory,
 } from './host/session.js'
 import type {
+  HostAgent,
   HostAgentRegistry,
   HostPluginContext,
-  HostScopedContext,
   HostSessionStore,
   HostUserQuestionService,
   HostWorkspaceRegistry,
@@ -154,7 +157,8 @@ export function createCommitAgentPlugin(
     ...(options.lockDir === undefined ? {} : { lockDir: options.lockDir }),
   })
   const sessions = new Map<string, DedicatedSession>()
-  const newSessionId = options.newSessionId ?? (() => `session-${randomUUID()}`)
+  const newSessionId =
+    options.newSessionId ?? (() => `${COMMIT_AGENT_SESSION_PREFIX}${randomUUID()}`)
 
   const requireAgents = (): HostAgentRegistry => {
     const agents = options.resolveAgents?.() ?? options.agents
@@ -196,19 +200,17 @@ export function createCommitAgentPlugin(
       // Make sure the data directory is usable *before* creating a session, so
       // a bad dataDir cannot leave an orphaned session behind.
       await service.init()
-      const setup = (agentCtx: HostScopedContext): void => {
-        restrictCommitAgentScope(agentCtx)
-      }
-      const session = await createDedicatedCommitSession(
-        {
-          agents,
-          newSessionId,
-          workspacePath: input.workspacePath,
-          ...(options.agentOptions === undefined ? {} : { agentOptions: options.agentOptions }),
-          ...(input.signal === undefined ? {} : { signal: input.signal }),
-        },
-        setup,
-      )
+      // The nine tools are installed by the `agent/created` listener in
+      // `apply`, matched on the reserved session-id prefix that `newSessionId`
+      // mints. Nothing is installed here, so a session created by the plugin
+      // and one created by the GitLens button take the exact same path.
+      const session = await createDedicatedCommitSession({
+        agents,
+        newSessionId,
+        workspacePath: input.workspacePath,
+        ...(options.agentOptions === undefined ? {} : { agentOptions: options.agentOptions }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      })
       sessions.set(session.sessionId, session)
       // Group the session under the Workspace that owns its directory. The
       // sidebar groups by Workspace membership, not by cwd, so a session that is
@@ -242,10 +244,7 @@ export function createCommitAgentPlugin(
 
     async resumeDedicatedSession(resumeSessionId) {
       const agents = requireAgents()
-      const setup = (agentCtx: HostScopedContext): void => {
-        restrictCommitAgentScope(agentCtx)
-      }
-      const session = await resumeDedicatedCommitSession({ agents, resumeSessionId }, setup)
+      const session = await resumeDedicatedCommitSession({ agents, resumeSessionId })
       sessions.set(session.sessionId, session)
       return session
     },
@@ -314,10 +313,9 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
     service: plugin.service,
     resolveWorkspace: async (agentSessionId) => {
       if (options.resolveWorkspace !== undefined) return await options.resolveWorkspace(agentSessionId)
-      // Fall back to the live session's authoritative cwd, so the tools are
-      // usable from an ordinary session in a repository. The GitLens entry
-      // still creates a dedicated session; this is what makes the feature
-      // reachable before that client surface exists.
+      // Fall back to the live session's authoritative cwd. The only sessions
+      // that ever reach these tools are the commit sessions, whose cwd is the
+      // planned worktree, so this is the same directory the task was opened on.
       const sessions = getService<HostSessionStore>('sessions')
       const cwd = sessions?.get?.(agentSessionId)?.header?.cwd
       return typeof cwd === 'string' && cwd !== '' ? cwd : null
@@ -368,12 +366,54 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
     },
   }
 
-  const disposeTools = registerCommitAgentTools(ctx, deps)
+  const definitions = buildCommitAgentTools(deps)
+
+  /**
+   * Install the nine tools into one commit-agent session's scope.
+   *
+   * `agent/created` is emitted while the agent is being registered — before
+   * `agent/session-start` and the first prompt assembly — for both `create` and
+   * `resume`, so a session created by the GitLens button and one created
+   * through the business API take the exact same path. The reserved session-id
+   * prefix is the whole contract, because it is the only thing the host knows
+   * about a session the client created (see `COMMIT_AGENT_SESSION_PREFIX`).
+   *
+   * Nothing is registered on the plugin's own context: a global registration
+   * would put the tools in every session's model surface.
+   */
+  const installed = new Map<string, () => void>()
+  const installAgent = (agent: HostAgent | undefined): void => {
+    if (agent === undefined || installed.has(agent.id) || !isCommitAgentSession(agent.id)) return
+    const agentCtx = agent.ctx
+    if (agentCtx === undefined) return
+    try {
+      installed.set(agent.id, installCommitAgentScope(agentCtx, definitions))
+    } catch (error) {
+      ctx.logger?.warn?.(
+        `dsh-git-commit-agent: could not install tools for ${agent.id}: `
+        + (error instanceof Error ? error.message : String(error)),
+      )
+    }
+  }
+  const uninstallAgent = (agent: HostAgent | undefined): void => {
+    if (agent === undefined) return
+    installed.get(agent.id)?.()
+    installed.delete(agent.id)
+  }
+  const payloadAgent = (payload: unknown): HostAgent | undefined =>
+    (payload as { agent?: HostAgent } | undefined)?.agent
+
+  // Sessions that already exist when the plugin mounts (a late row, or HMR).
+  for (const agent of getService<HostAgentRegistry>('agents')?.list?.() ?? []) installAgent(agent)
+  ctx.on?.('agent/created', (payload) => installAgent(payloadAgent(payload)))
+  ctx.on?.('agent/disposed', (payload) => uninstallAgent(payloadAgent(payload)))
+
   if (typeof ctx.provide === 'function') ctx.provide('gitCommitAgent', plugin.api)
   ctx.logger?.info?.('dsh-git-commit-agent mounted')
 
   ctx.effect?.(() => () => {
-    disposeTools()
+    for (const dispose of installed.values()) dispose()
+    installed.clear()
     void plugin.dispose()
   })
 

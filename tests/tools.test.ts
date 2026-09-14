@@ -10,11 +10,12 @@ import { test } from 'node:test'
 import { CommitAgentService } from '../src/core/service.js'
 import {
   buildCommitAgentTools,
+  COMMIT_AGENT_SESSION_PREFIX,
   COMMIT_AGENT_TOOL_NAMES,
-  registerCommitAgentTools,
-  restrictCommitAgentScope,
+  installCommitAgentScope,
+  isCommitAgentSession,
 } from '../src/host/tools.js'
-import type { HostPluginContext, HostToolDefinition, HostToolRunContext } from '../src/host/types.js'
+import type { HostToolDefinition, HostToolRunContext } from '../src/host/types.js'
 import { createInitialisedFixture, type Fixture } from './helpers/fixture.js'
 import { writeFile } from './helpers/fixture.js'
 
@@ -70,31 +71,17 @@ test('no tool exposes a general-purpose escape hatch', () => {
   }
 })
 
-test('registerCommitAgentTools registers all tools and disposes them in reverse', () => {
+test('installCommitAgentScope registers all tools, closes the inherited surface and fails closed', () => {
   const registered: string[] = []
   const disposed: string[] = []
-  const ctx = {
+  const restrictions: Array<{ allow?: readonly string[]; deny?: readonly string[] }> = []
+  let guard: ((execution: unknown) => string | undefined) | null = null
+  const agentCtx = {
     tools: {
       register(definition: HostToolDefinition) {
         registered.push(definition.name)
         return () => disposed.push(definition.name)
       },
-      restrict: () => () => undefined,
-      guard: () => () => undefined,
-    },
-  } as unknown as HostPluginContext
-  const dispose = registerCommitAgentTools(ctx, { service: new CommitAgentService({ dataDir: '/tmp/unused' }), resolveWorkspace: async () => null })
-  assert.deepEqual(registered, [...COMMIT_AGENT_TOOL_NAMES])
-  dispose()
-  assert.deepEqual(disposed, [...COMMIT_AGENT_TOOL_NAMES].reverse())
-})
-
-test('the scope restriction allows only commit-agent tools and fails closed', () => {
-  const restrictions: Array<{ allow?: readonly string[]; deny?: readonly string[] }> = []
-  let guard: ((execution: unknown) => string | undefined) | null = null
-  const agentCtx = {
-    tools: {
-      register: () => () => undefined,
       restrict(filter: { allow?: readonly string[]; deny?: readonly string[] }) {
         restrictions.push(filter)
         return () => undefined
@@ -105,8 +92,18 @@ test('the scope restriction allows only commit-agent tools and fails closed', ()
       },
     },
   }
-  restrictCommitAgentScope(agentCtx)
-  assert.deepEqual(restrictions[0]?.allow, [...COMMIT_AGENT_TOOL_NAMES])
+  const definitions = buildCommitAgentTools({
+    service: new CommitAgentService({ dataDir: '/tmp/unused' }),
+    resolveWorkspace: async () => null,
+  })
+  const dispose = installCommitAgentScope(agentCtx, definitions)
+
+  // The nine are the scope's OWN registrations: they shadow a global of the
+  // same name and are exempt from the restriction below.
+  assert.deepEqual(registered, [...COMMIT_AGENT_TOOL_NAMES])
+  // An empty `allow` is the valid "hide everything inherited" mask. Naming the
+  // nine here would throw once they are no longer registered globally.
+  assert.deepEqual(restrictions, [{ allow: [] }])
   assert.ok(guard !== null)
   const check = guard as unknown as (execution: unknown) => string | undefined
   assert.equal(check({ toolName: 'commit_agent_status' }), undefined)
@@ -114,6 +111,16 @@ test('the scope restriction allows only commit-agent tools and fails closed', ()
   // Fail closed when the execution record shape is unknown.
   assert.equal(typeof check({}), 'string')
   assert.equal(typeof check(null), 'string')
+
+  dispose()
+  assert.deepEqual(disposed, [...COMMIT_AGENT_TOOL_NAMES].reverse())
+})
+
+test('only the reserved session-id prefix marks a commit session', () => {
+  assert.equal(COMMIT_AGENT_SESSION_PREFIX, 'session-git-commit-')
+  assert.equal(isCommitAgentSession(`${COMMIT_AGENT_SESSION_PREFIX}1f2e`), true)
+  assert.equal(isCommitAgentSession('session-1f2e'), false)
+  assert.equal(isCommitAgentSession(''), false)
 })
 
 test('commit_agent_status reports changes for the bound task', async () => {

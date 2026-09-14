@@ -92,12 +92,39 @@ any in-process plugin can call the business API's `approvePlan` directly.
 
 ## Trying it
 
-**From GitLens:** with pending changes, click **规划并提交变更** in the commit row
-(next to the built-in Commit button). The plugin opens a new session in the
-selected worktree, seeds the planning request and submits it.
+**Only from GitLens.** With pending changes, click the **commit-node icon** in
+the commit row (next to the built-in Commit button; its tooltip reads
+**在新会话中规划并提交这些变更**). The plugin opens a new session in the selected
+worktree, seeds the planning request and submits it.
 
-**From any chat session** whose working directory is a git repository with
-pending changes, just ask the agent to plan the commits.
+An ordinary chat session does **not** see the commit tools, and cannot start
+this workflow by asking. The nine tools are installed into exactly one agent
+scope, the session the button creates — never into every session.
+
+### Per-session tool injection
+
+DSH resolves a tool surface **per agent scope**: `register()` on a plugin's own
+context is visible to every session, while `register()` on an agent's
+`agent.ctx` is visible only to that agent. Mounting the nine tools globally was
+the original shortcut, and it put them in every session's model surface.
+
+Instead, the host half installs them on `agent/created` for agents whose session
+id carries the reserved prefix `session-git-commit-`
+(`src/host/tools.ts` `COMMIT_AGENT_SESSION_PREFIX`). Since the GitLens button
+cannot call `AgentRegistry.create` from the browser, it preallocates such an id
+through the public `ISessions.create({ sessionId })` contract; a session created
+through the business API's `startDedicatedSession` gets one from the same
+`newSessionId` default. Installation adds, in the target scope only:
+
+- the nine tool definitions,
+- `restrict({ allow: [] })`, which hides the entire inherited surface (the
+  global layer plus every preset/standing ancestor layer) and leaves only the
+  scope's own nine visible,
+- the terminal `guard`, which allow-lists the nine by name and fails closed.
+
+`agent/created` fires during registration — before `agent/session-start` and the
+first prompt assembly — for both `create` and `resume`, so the first model
+request already runs against the closed surface.
 
 ### Session grouping (工作区归属)
 
@@ -170,7 +197,7 @@ src/core/                     host-agnostic, fully testable
   service.ts                  orchestration used by the tools
 src/host/                     structural mirrors of the verified DSH contract
   types.ts                    host service faces (no compile-time host dependency)
-  tools.ts                    the nine ToolDefinition objects + scope restriction
+  tools.ts                    the nine ToolDefinition objects + per-session scope install
   session.ts                  dedicated normal session, prompts
 src/index.ts                  Cordis plugin: apply(ctx, config) + business API
 ```
@@ -212,6 +239,38 @@ npm run build
 
 Tests never touch a user repository: every fixture is a fresh temp repo with
 pinned identity, signing disabled and its own hooks path.
+
+### Component → source locator (dev-only)
+
+`@havocrao/dsh-code-finder` is wired in as a dev dependency so that holding
+**Opt+Shift** and hovering a `CommitAction` / `PlanCard` / `ApprovalCard`
+element in the DSH web UI shows `client/client.js:line:col`.
+
+```sh
+npm run inject:dev      # NODE_ENV=development dcf instrument client --write
+npm run inject:revert   # restore the tracked file when you are done
+```
+
+This project has no bundler config, so — unlike the tsdown/vite plugins — the
+elements are located by the **standalone instrument** entry applied to the
+hand-written client bundle. The overlay and the `/code-finder/api/*` routes come
+from the host: `cordis.patch.yml` here is a plugin-type patch (insert-only), so
+`dcf init` intentionally adds no mount row (the host layer owns it).
+
+Two things to keep in mind:
+
+- **`client/client.js` is tracked source, not a build artifact.** Injection
+  reprints it (`+1063/−219` lines) and `prepack` only runs `tsc`, so it will
+  *not* be restored for you — run `npm run inject:revert` before committing or
+  `npm pack`. Injection is idempotent and reverting is byte-exact.
+- **Name-level search needs a root.** Precise coordinates come from the
+  injection; the declaration-name fallback additionally requires this repo's
+  `client/` directory in the profile roots: `dcf roots add web "$PWD/client"`
+  (idempotent). Roots are read at boot, so restart the host after changing them
+  (`dsh web stop && dsh web`).
+
+See `docs/README.md` in the [DSH-code-finder](../DSH-code-finder) repo
+("零构建插件" and "C. cordis 纯 runtime") for the full contract.
 
 ## Not in this version
 
