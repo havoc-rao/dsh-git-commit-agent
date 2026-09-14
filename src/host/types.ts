@@ -28,6 +28,13 @@ export interface HostToolDefinition {
   readonly output: {
     readonly schema: JsonSchemaNode
     render(args: unknown, value: unknown): ContentBlock[]
+    /**
+     * Pure, replayable presentation metadata for direct top-level calls
+     * (`packages/core/tools/src/index.ts:204-211`). The model never sees it; a
+     * client-side view can. Must be JSON-serializable and must not throw on
+     * obsolete logged arguments.
+     */
+    presentationMeta?(args: unknown, value: unknown): unknown
   }
   execute(args: unknown, exec: HostToolRunContext): Promise<unknown>
 }
@@ -119,6 +126,37 @@ export interface HostSessionsClient {
   create(options?: { readonly sessionId?: string; readonly cwd?: string; readonly workspaceId?: string }): Promise<string>
   open(id: string): void
   refresh(): Promise<void>
+}
+
+/**
+ * Live session store face (`ctx.sessions`, `packages/core/session/src/index.ts:1177`).
+ * `get` returns only live sessions; the header carries the authoritative cwd.
+ */
+export interface HostSessionStore {
+  get(id: string): { readonly header?: { readonly cwd?: string } } | undefined
+}
+
+/**
+ * `ctx.userQuestions` (`packages/interaction/user-questions/src/index.ts:65-178`).
+ *
+ * `ask` is the host-owned human decision surface. The `plan-review` intent makes
+ * a capable UI render the plans as a review panel; the answer encoding is the
+ * same either way.
+ */
+export interface HostUserQuestionService {
+  ask(request: {
+    readonly questions: ReadonlyArray<{
+      readonly id: string
+      readonly question: string
+      readonly detail?: string
+      readonly header?: string
+      readonly options?: ReadonlyArray<{ readonly label: string; readonly description?: string }>
+      readonly multiSelect?: boolean
+      readonly intent?: { readonly kind: 'plan-review'; readonly approve: string }
+    }>
+    readonly agent?: unknown
+    readonly signal?: AbortSignal
+  }): Promise<{ readonly answers: ReadonlyArray<{ readonly id: string; readonly selected: string[]; readonly custom?: string }> }>
 }
 
 /** Minimal Cordis plugin context face. */

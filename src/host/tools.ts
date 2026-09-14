@@ -13,6 +13,7 @@
  */
 import { asGitCommitError, GitCommitError, type GitCommitErrorCode } from '../core/errors.js'
 import type { CommitAgentService } from '../core/service.js'
+import { buildPlanReview } from '../core/review.js'
 import type { ChangeRecord, PlanVersion } from '../core/types.js'
 import type { ContentBlock, HostPluginContext, HostScopedContext, HostToolDefinition, HostToolRunContext, JsonSchemaNode } from './types.js'
 
@@ -23,6 +24,7 @@ export const COMMIT_AGENT_TOOL_NAMES = [
   'commit_agent_read_context',
   'commit_agent_recent_commits',
   'commit_agent_publish_plan',
+  'commit_agent_request_approval',
   'commit_agent_execute_plan',
   'commit_agent_cancel_execution',
   'commit_agent_reconcile',
@@ -38,6 +40,34 @@ export interface ToolDependencies {
   resolveWorkspace(agentSessionId: string): Promise<string | null>
   /** Source coding session that dispatched the task, when known. */
   resolveSourceSession?(agentSessionId: string): string | null
+  /**
+   * Ask the human to approve one exact plan revision.
+   *
+   * Supplied by the host integration (the DSH `plan-review` question intent).
+   * When absent, the approval tool reports that interactive approval is
+   * unavailable instead of approving anything by itself.
+   */
+  askUserApproval?(prompt: UserApprovalPrompt): Promise<UserApprovalDecision>
+}
+
+/** One approval prompt handed to the host's question surface. */
+export interface UserApprovalPrompt {
+  readonly header: string
+  readonly question: string
+  /** The plan document the decision is about; must equal what the digest covers. */
+  readonly detail: string
+  readonly approveLabel: string
+  readonly declineLabel: string
+  /** The live calling agent (the host requires the exact live root). */
+  readonly agent?: unknown
+  readonly signal?: AbortSignal
+}
+
+/** The human's decision. */
+export interface UserApprovalDecision {
+  readonly approved: boolean
+  readonly selected: readonly string[]
+  readonly custom?: string
 }
 
 /** Build one text-only render projection. */
@@ -131,7 +161,7 @@ function failure(error: unknown): never {
   throw e
 }
 
-/** Build the eight tool definitions bound to one service. */
+/** Build the nine tool definitions bound to one service. */
 export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinition[] {
   const { service } = deps
 
@@ -315,6 +345,13 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
     ),
     output: {
       schema: { type: 'object' },
+      // The canonical value carries the per-commit patch so a client-side plan
+      // card can render a proposed diff without a second host round-trip. The
+      // model never sees this: it only receives `render`'s text projection.
+      presentationMeta: (_args, value) => {
+        const v = value as Record<string, unknown>
+        return (v['preview'] ?? null) as never
+      },
       render: textRender((v: Record<string, unknown>) => {
         const plan = (v['plan'] as Record<string, unknown> | undefined) ?? {}
         const blockers = (plan['blockers'] as Array<Record<string, unknown>> | undefined) ?? []
@@ -348,15 +385,119 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
           preview: published.preview.map((block) => ({
             commitId: block.commitId,
             message: block.message,
+            rationale: block.rationale,
+            dependsOn: [...block.dependsOn],
             changes: block.changes.map((c) => ({ ...c })),
             baseTree: block.baseTree,
             expectedTree: block.expectedTree,
+            patch: block.patch,
             patchTruncated: block.patchTruncated,
           })),
           nextStep:
             published.plan.blockers.length === 0
               ? `Ask the user to review this revision and approve it (plan ${published.plan.planId} revision ${published.plan.revision}, digest ${published.plan.planDigest}), then call commit_agent_execute_plan.`
               : 'Resolve the blockers and publish a new revision.',
+        }
+      } catch (error) {
+        failure(error)
+      }
+    },
+  }
+
+  const requestApproval: HostToolDefinition = {
+    name: 'commit_agent_request_approval',
+    description:
+      'Ask the human to approve exactly one plan revision. The host shows them the plan document and records the '
+      + 'decision; you cannot approve a plan yourself, and a plan nobody approved can never be executed. Call this '
+      + 'once the plan is complete (no blockers) and after you have explained it in chat. If the user asks for a '
+      + 'change, publish a NEW revision first — approving an old revision is refused. Declining is a normal outcome: '
+      + 'ask what should change and publish again.',
+    parameters: parameters(
+      {
+        planId: stringProp('Plan id to submit for approval.'),
+        revision: numberProp('Exact revision to submit. Must be the newest revision.'),
+      },
+      ['planId', 'revision'],
+    ),
+    output: {
+      schema: { type: 'object' },
+      presentationMeta: (_args, value) => {
+        const v = value as Record<string, unknown>
+        return {
+          approved: v['approved'] === true,
+          planId: v['planId'] ?? null,
+          revision: v['revision'] ?? null,
+          planDigest: v['planDigest'] ?? null,
+        } as never
+      },
+      render: textRender((v: Record<string, unknown>) => {
+        if (v['approved'] === true) {
+          return `User approved plan ${String(v['planId'])} revision ${String(v['revision'])} (digest ${String(v['planDigest'])}). `
+            + 'You may now call commit_agent_execute_plan with this exact revision.'
+        }
+        return `The user did NOT approve plan ${String(v['planId'])} revision ${String(v['revision'])}`
+          + (Array.isArray(v['selected']) && v['selected'].length > 0 ? ` (they chose: ${v['selected'].join(', ')})` : '')
+          + '. Ask what should change, publish a new revision, and request approval again. Do not execute anything.'
+      }),
+    },
+    async execute(args, exec): Promise<unknown> {
+      try {
+        const a = args as { planId: string; revision: number }
+        const taskId = await requireTaskId(deps, exec)
+        const plans = await service.plansOf(taskId)
+        const plan = plans.find((p) => p.planId === a.planId && p.revision === a.revision)
+        if (plan === undefined) {
+          throw new GitCommitError('PLAN_NOT_FOUND', `plan ${a.planId} revision ${a.revision} was not found`, {
+            taskId,
+          })
+        }
+        if (plan.blockers.length > 0) {
+          throw new GitCommitError('PLAN_INVALID', 'a plan with blockers cannot be submitted for approval', {
+            blockers: plan.blockers.map((b) => b.code),
+          })
+        }
+        const ask = deps.askUserApproval
+        if (ask === undefined) {
+          throw new GitCommitError(
+            'BAD_ARGUMENT',
+            'this host provides no interactive approval surface, so the plan cannot be approved from here',
+            { planId: plan.planId, revision: plan.revision },
+          )
+        }
+        const review = buildPlanReview(plan)
+        const decision = await ask({
+          ...review,
+          ...(exec.agent === undefined ? {} : { agent: exec.agent }),
+          signal: exec.signal as AbortSignal,
+        })
+        if (!decision.approved) {
+          return {
+            approved: false,
+            taskId,
+            planId: plan.planId,
+            revision: plan.revision,
+            planDigest: plan.planDigest,
+            selected: [...decision.selected],
+            ...(decision.custom === undefined ? {} : { custom: decision.custom }),
+          }
+        }
+        const approved = await service.approvePlan({
+          taskId,
+          planId: plan.planId,
+          revision: plan.revision,
+          planDigest: plan.planDigest,
+          requestId: `plan-review:${plan.planId}:${plan.revision}`,
+          approvedBy: 'user:plan-review',
+        })
+        return {
+          approved: true,
+          taskId,
+          planId: approved.planId,
+          revision: approved.revision,
+          planDigest: approved.planDigest,
+          approvedAt: approved.approval?.approvedAt ?? null,
+          approvedBy: approved.approval?.approvedBy ?? null,
+          nextStep: `Call commit_agent_execute_plan with planId ${approved.planId} and revision ${approved.revision}.`,
         }
       } catch (error) {
         failure(error)
@@ -466,7 +607,7 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
     },
   }
 
-  return [status, diff, readContext, recentCommits, publishPlan, executePlan, cancelExecution, reconcile]
+  return [status, diff, readContext, recentCommits, publishPlan, requestApproval, executePlan, cancelExecution, reconcile]
 }
 
 /** Error codes that the model is allowed to see verbatim. */

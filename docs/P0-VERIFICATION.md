@@ -266,3 +266,80 @@ added an independent driver plugin; the second pass additionally set
 `resume`, a model turn completing end to end (no API key in the verification
 environment), the web client's `ISessions.open`, cancel/reconcile, multi-session
 concurrency, and Windows.
+
+## 8. Client-half contract research (2026-09-14)
+
+Read-only investigation of what a `dsh.client` (web) half would require, run by
+the same harness session. No checkout file was modified.
+
+### 8.1 The bundle format is hand-writable
+
+A client half is a single lazy-CJS file registered as
+`window.__ModuleLoader__.load({ id: '<pkg>', factory: (require) => { …; exports.apply = apply; exports.inject = inject; return module.exports } })`,
+reached through the package's `./client` export
+(`packages/client/modules/src/client/manifest.ts:202-204`, loader
+`packages/client/modules/src/client/system.ts:207-219`). `require` resolves only
+the platform seeds (`react`, `react/jsx-runtime`, `react-dom`, `react-dom/client`,
+`@deepseek-ai/cordis`, `@deepseek-ai/dsh-client-store`, `@deepseek-ai/dsh-client-ui-slots`,
+`@deepseek-ai/dsh-client-ui-primitives`, `@deepseek-ai/dsh-client-ui-dockkit` —
+`packages/client/web/src/platform.ts:9-13`) and already-registered package ids;
+relative sub-paths are **not** resolvable. A source map is optional (the host
+falls back to an identity map), and HMR only hashes the bundle file. So a plain
+single-file `client.js` with `React.createElement` and no bundler is viable.
+
+### 8.2 Browser code cannot reach a host service without a Remote
+
+`ctx.provide('gitCommitAgent', api)` lives in the Node process only. Exposing it
+to the browser requires `@Remote` on a class extending `TypertRemoteService`
+from `@deepseek-ai/dsh-typert-protocol` (`packages/typert/protocol/src/index.ts:152-201`);
+a plain object cannot be discovered (the gateway requires a `typertRemote`
+binding, `packages/api/gateway/src/index.ts:277-295`). Runtime SRC mode removes
+the need for codegen but the client must `ctx.remote.$mount(contribution)`
+itself, and `$mount` **requires strict codecs** (`gateway/src/client/index.ts:286-290`),
+satisfiable with a passthrough `schema: { parse: v => v }`.
+
+Two consequences worth recording:
+
+- `@deepseek-ai/dsh-typert-protocol` would become a real dependency of this
+  package (it is public, `publishConfig.access: public`), and `@deepseek-ai/cordis`
+  a peer. Whether a plugin-local cordis copy interoperates with the host
+  gateway's symbols is **not verified** and is the main risk of that path.
+- Because of that risk, the approval path was **not** built on a Remote.
+
+### 8.3 A host-owned approval primitive already exists (now used)
+
+`ctx.userQuestions.ask()` supports a `plan-review` intent
+(`packages/interaction/user-questions/src/types.ts:39-48`) and DSH already ships
+a renderer for it (`packages/client/ui-user-questions/src/client/PlanReviewPanel.tsx`).
+The intent requires the `approve` label to be one of the question's own options
+and the reviewed content to be present as `detail`
+(`packages/interaction/user-questions/src/index.ts:150-166`), and `ask()` accepts
+only the exact live root agent (`:86-104`).
+
+That is a strictly better approval surface than a plugin-drawn button: it is
+host-owned, it renders the plan the digest covers, and it needs **no client
+code at all**. The plugin now uses it via `commit_agent_request_approval`
+(`src/core/review.ts` builds the document, `src/index.ts` wires the intent).
+
+### 8.4 What remains for the GitLens button
+
+Only the entry point is left:
+
+1. a `dsh.client` half (`platform: 'web'`, `./client` export) rendering a
+   button through `ctx.betterSidebar.registerGitCommitAction`, using the
+   better-sidebar contract in `docs/BETTER-SIDEBAR-INTEGRATION.md`;
+2. a Remote (or an equivalent host-owned trigger) to create the dedicated
+   session, since `AgentRegistry.create` is host-side;
+3. the proposed-diff preview via `openTab({ type: 'diff', diff: { kind: 'proposed', … } })`,
+   which needs no Remote — the plan patch now travels in the tool result's
+   `presentationMeta`.
+
+Steps 1 and 3 carry no unknown contract. Step 2 is the part with the unverified
+plugin-local-cordis risk described in §8.2 and must be verified on a live host.
+
+### 8.5 Not verified
+
+The web shell was not booted (that would require building `apps/web`'s `lib/`,
+which the read-only constraint forbids), so the hand-written bundle, the
+`$mount` handshake and the button render are **unverified**; only the contracts
+above are source-verified.

@@ -18,6 +18,8 @@ export type { LockRecord, AcquireOptions } from './plan/lock.js'
 export { assertPlanApprovable, executeApprovedPlan, reconcilePlan } from './plan/executor.js'
 export type { ExecutePlanInput, ExecutionEvent, ReconciliationResult } from './plan/executor.js'
 export { canonicalJson, computePlanDigest, digestInputOf } from './plan/digest.js'
+export { buildPlanReview } from './review.js'
+export type { PlanReview } from './review.js'
 export { CommitAgentService, defaultDataDir } from './service.js'
 export type {
   ServiceOptions,

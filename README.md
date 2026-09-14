@@ -33,7 +33,7 @@ GitLens entry ──▶ dedicated native session ──▶ status/diff analysis
 | GitLens button + DiffPane plan preview | better-sidebar seams **delivered** (`registerGitCommitAction`, `getGitCommitTarget`, `{kind:'proposed'}`) on `feat/git-commit-action-seam` @ `edf6837`; **this plugin's client UI is not implemented yet** — names and evidence in [`docs/BETTER-SIDEBAR-INTEGRATION.md`](docs/BETTER-SIDEBAR-INTEGRATION.md) |
 | Live DSH host integration | **verified twice** on 2026-09-14 (headless profile, scratch `DSH_HOME`): bare mount with `inject: ['tools']` only, restricted 8-tool surface, guard denial, session visibility, uninstall disposal and a real commit — see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §7. The two rounds found and fixed three defects (missing lazy `agents` lookup; `followup` payload shape; default `dataDir` ignoring `DSH_HOME`) |
 
-65 automated tests pass against real, isolated git repositories (`npm test`).
+72 automated tests pass against real, isolated git repositories (`npm test`).
 
 ## Prerequisites
 
@@ -70,6 +70,7 @@ calling the dedicated-session API on a host without one fails with a clear
 | `commit_agent_read_context` | bounded file reads (secrets excluded with a reason, binaries skipped) |
 | `commit_agent_recent_commits` | recent subjects for message style |
 | `commit_agent_publish_plan` | publish a new immutable plan revision; the host validates, computes every expected tree, returns the preview |
+| `commit_agent_request_approval` | ask the human to approve exactly one revision, through the host's own plan-review panel; the host records the decision |
 | `commit_agent_execute_plan` | execute a revision the **user** approved; the host verifies approval, snapshot and staged tree |
 | `commit_agent_cancel_execution` | request cancellation at the next safe boundary |
 | `commit_agent_reconcile` | match real history against a plan's expected trees without changing anything |
@@ -77,13 +78,39 @@ calling the dedicated-session API on a host without one fails with a clear
 There is no shell, no arbitrary git invocation, no `cwd`, no file write, no
 network and no delegation tool.
 
+## How approval works
+
+The model can propose, preview and explain — it can never approve. Approval goes
+through the host's own question surface using the `plan-review` intent
+(`ctx.userQuestions.ask({ ... intent: { kind: 'plan-review', approve: 'Approve' } })`),
+so the user sees the plan document the content digest covers and answers through
+a host-owned protocol. `commit_agent_request_approval` submits one exact
+revision; a decline is a normal outcome, and a newer revision revokes an older
+approval. `approvedBy` is recorded as `user:plan-review` — an audit label, not a
+cryptographic identity: DSH has no authenticated in-process user identity, and
+any in-process plugin can call the business API's `approvePlan` directly.
+
+## Trying it (before the GitLens button exists)
+
+The plugin is usable from an ordinary chat session today:
+
+1. open a session whose working directory is a git repository with pending changes;
+2. ask the agent to plan the commits (it will call `commit_agent_status`, read the
+   diffs, and publish a plan);
+3. review the plan and approve it in the host's plan-review panel;
+4. the agent calls `commit_agent_execute_plan` and reports what landed.
+
+The GitLens commit-row button and the proposed-diff preview still require this
+plugin's client half; the better-sidebar seams for them are already delivered
+(see `docs/BETTER-SIDEBAR-INTEGRATION.md`).
+
 ## Business API
 
 ```ts
 import { apply as mount } from 'dsh-git-commit-agent'
 
 const plugin = mount(ctx, { dataDir: '~/.dsh/git-commit-agent' })
-plugin.api.toolNames            // the eight tool names
+plugin.api.toolNames            // the nine tool names
 plugin.api.systemPrompt()
 await plugin.api.startDedicatedSession({ workspacePath, sourceSessionId, userConstraints })
 await plugin.api.openTask({ sourceSessionId, agentSessionId: null, workspaceRoot })
@@ -113,7 +140,7 @@ src/core/                     host-agnostic, fully testable
   service.ts                  orchestration used by the tools
 src/host/                     structural mirrors of the verified DSH contract
   types.ts                    host service faces (no compile-time host dependency)
-  tools.ts                    the eight ToolDefinition objects + scope restriction
+  tools.ts                    the nine ToolDefinition objects + scope restriction
   session.ts                  dedicated normal session, prompts
 src/index.ts                  Cordis plugin: apply(ctx, config) + business API
 ```

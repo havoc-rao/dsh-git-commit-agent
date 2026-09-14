@@ -30,7 +30,13 @@ import {
   type DedicatedSession,
   type UserMessageFactory,
 } from './host/session.js'
-import type { HostAgentRegistry, HostPluginContext, HostScopedContext } from './host/types.js'
+import type {
+  HostAgentRegistry,
+  HostPluginContext,
+  HostScopedContext,
+  HostSessionStore,
+  HostUserQuestionService,
+} from './host/types.js'
 
 /** Plugin name, matching the cordis row and package name. */
 export const name = 'dsh-git-commit-agent'
@@ -273,12 +279,58 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
     service: plugin.service,
     resolveWorkspace: async (agentSessionId) => {
       if (options.resolveWorkspace !== undefined) return await options.resolveWorkspace(agentSessionId)
-      // Without a host callback, only an already-opened task can resolve a worktree.
-      return null
+      // Fall back to the live session's authoritative cwd, so the tools are
+      // usable from an ordinary session in a repository. The GitLens entry
+      // still creates a dedicated session; this is what makes the feature
+      // reachable before that client surface exists.
+      const sessions = getService<HostSessionStore>('sessions')
+      const cwd = sessions?.get?.(agentSessionId)?.header?.cwd
+      return typeof cwd === 'string' && cwd !== '' ? cwd : null
     },
     ...(options.resolveSourceSession === undefined
       ? {}
       : { resolveSourceSession: options.resolveSourceSession }),
+    askUserApproval: async (prompt) => {
+      const questions = getService<HostUserQuestionService>('userQuestions')
+      if (questions === undefined || typeof questions.ask !== 'function') {
+        throw new GitCommitError(
+          'BAD_ARGUMENT',
+          'this host has no user-questions service, so an interactive approval cannot be requested; '
+          + 'approve through the business API instead',
+        )
+      }
+      const questionId = 'git-commit-plan-review'
+      const answer = await questions.ask({
+        questions: [
+          {
+            id: questionId,
+            header: prompt.header,
+            question: prompt.question,
+            detail: prompt.detail,
+            options: [
+              {
+                label: prompt.approveLabel,
+                description: 'Approve exactly this plan revision and let the executor create these commits.',
+              },
+              {
+                label: prompt.declineLabel,
+                description: 'Do not approve. The plan stays unapproved and nothing will be committed.',
+              },
+            ],
+            intent: { kind: 'plan-review', approve: prompt.approveLabel },
+          },
+        ],
+        ...(prompt.agent === undefined ? {} : { agent: prompt.agent }),
+        ...(prompt.signal === undefined ? {} : { signal: prompt.signal }),
+      })
+      const item = answer?.answers?.find((entry) => entry.id === questionId)
+      const selected = Array.isArray(item?.selected) ? item.selected : []
+      return {
+        approved: selected.includes(prompt.approveLabel),
+        selected,
+        ...(typeof item?.custom === 'string' ? { custom: item.custom } : {}),
+      }
+    },
   }
 
   const disposeTools = registerCommitAgentTools(ctx, deps)

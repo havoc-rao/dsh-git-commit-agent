@@ -6,7 +6,7 @@ exact plan revision does.
 
 ## 1. No general-purpose privilege
 
-- The plugin exposes **eight closed tools** (`src/host/tools.ts`). There is no
+- The plugin exposes **nine closed tools** (`src/host/tools.ts`). There is no
   shell tool, no arbitrary git invocation, no `cwd`, no file write, no network
   and no delegation.
 - Every git argument array is constructed by `GitRunner` (`src/core/git/runner.ts`).
@@ -21,7 +21,7 @@ exact plan revision does.
   user's identity, hooks and signing behave exactly as in their own terminal.
 - Analysis never executes repository-supplied programs: hashing uses
   `git hash-object --no-filters`; diffs use `--no-ext-diff --no-textconv`.
-- The dedicated agent's scope is `restrict({ allow: <8 tools> })` plus a
+- The dedicated agent's scope is `restrict({ allow: <9 tools> })` plus a
   terminal `guard` that **fails closed** if it cannot read the tool name from the
   execution record (`restrictCommitAgentScope`).
 - Repository text and diffs are data. The system prompt says so explicitly.
@@ -164,7 +164,7 @@ bound what "the user approved" means:
    `approval.planDigest === plan.planDigest === recompute(plan)` and the plan has
    no blockers. A caller can approve, but it cannot make the executor commit
    something different from what the approval covers.
-2. **The eight tools are registered globally.** An unrelated session can see
+2. **The nine tools are registered globally.** An unrelated session can see
    `commit_agent_*`. Bounded risk again: planning never writes to the
    repository, and execution requires an approval bound to a plan digest. Scoping
    the tools to only the dedicated session would require registering them inside
@@ -174,5 +174,21 @@ bound what "the user approved" means:
    source and observed live. Our guard allow-lists by name and fails closed when
    the name cannot be read, which is why the guard is not optional.
 4. **Uninstall must dispose.** `apply` wires `ctx.effect(() => () => { disposeTools(); plugin.dispose() })`
-   so the eight tools and any created session are released. Live uninstall was
+   so the nine tools and any created session are released. Live uninstall was
    not exercised.
+5. **`approvedBy` is an audit label, not an identity.** Interactive approval goes
+   through the host's `plan-review` question intent and the record is stamped
+   `user:plan-review`. DSH models no authenticated in-process user identity, so
+   this records *how* the approval was obtained, not *who* granted it. Anything
+   that can reach the business API in process can approve without a human; the
+   control that still holds is content binding — the executor re-derives the
+   digest and refuses anything the approval does not cover.
+6. **A session's cwd is trusted input.** With no dedicated session bound yet, the
+   tools fall back to the calling session's authoritative `cwd` from the host
+   session store. The worktree is therefore chosen by the host's session record,
+   never by the model, which cannot pass a path.
+7. **The plan-review document is the approved content.** `buildPlanReview` renders
+   the worktree, branch, HEAD, index strategy, every commit message, the change
+   ids, the exclusions and the digest prefix; the digest itself is computed over
+   the structured plan, not over the markdown. A reviewer who reads the panel and
+   approves has seen the change set the digest covers.

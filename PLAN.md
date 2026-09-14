@@ -286,7 +286,7 @@ git.commit-plan.cancel
 | GitLens 入口 / DiffPane 计划预览 | better-sidebar 侧接缝**已交付并实现**（`feat/git-commit-action-seam` @ `edf6837`）；本插件**客户端 UI 尚未实现** | 确切名字与证据见 `docs/BETTER-SIDEBAR-INTEGRATION.md` |
 | 真机宿主联调 | **已完成两轮**：第一轮发现 2 个阻断缺陷并修复；第二轮原样挂载（无 shim）复验通过，并发现并修复第 3 个（dataDir 忽略 `DSH_HOME`） | `docs/P0-VERIFICATION.md` §7、§7.1 |
 
-测试：`npm test` → 65/65 通过（`node --test`，真实隔离 git 仓库）。
+测试：`npm test` → 72/72 通过（`node --test`，真实隔离 git 仓库）。
 真机联调在 scratch `DSH_HOME` 的 headless profile 中进行，未修改官方 checkout 或生成产物。
 
 ### 13.2 对 §10 待核对项的结论
@@ -307,14 +307,21 @@ git.commit-plan.cancel
 3. **计划卡片第一版不走自定义 transcript 节点**：改为 keyed `tool.call.toolview` + 工具结果携带 planId/revision/digest。ChatNode 卡片列为 P3。
 4. **better-sidebar 不作为运行时依赖**：插件不 import better-sidebar 任何代码，入口通过自有业务 API 提供；GitLens 按钮通过对方新交付的 `registerGitCommitAction` 接入。对方明确退回的边界（业务状态、持久化、专用会话创建、审批绑定）本插件自行承担，与 §3 一致。对方同时**去掉了 descriptor 的 `title`/`icon`**、未实现 `setGitCommitStatus`，且 `getGitCommitTarget` 故意非响应式——本插件组件需自持文案/图标与状态展示。
 5. **工具定义不走 `defineTool` DSL**：为消除对 `@deepseek-ai/dsh-tools` 的编译期依赖，直接构造宿主 `register` 要求的 `ToolDefinition`（原始 JSON Schema + `render`）。契约等价。
-6. **`followup` 的 `UserMessage` 形状未核对**：P0 未记录其字段，当前发送 `{ text }`，首次真机挂载需确认（`src/host/session.ts` 已标注）。
-7. **末端 guard 的 `ToolExecution` 字段未核对**：guard 在无法读出工具名时**拒绝**（fail-closed），不假设字段名。
+6. **`followup` 的 `UserMessage` 形状**：已在真机确认并修复（原 `{ text }` 会污染日志并使首轮失败）。现发送完整 `UserMessage`；宿主 `createUserMessage` 惰性解析优先，解析不到时用结构等价的冻结对象兜底（实测宿主包从 link 安装的插件不可解析，兜底即生产路径）。
+7. **末端 guard 的 `ToolExecution` 字段**：真机确认真实字段为 `execution.name`，已优先读取；其余名字仅作兜底，读不到仍拒绝（fail-closed）。
 8. **`materializePlan` 的 `baseTree` 语义修正**：reuse-index 策略下，首个提交的“父树”是 HEAD 树而非 index 树；空提交检测与预览 diff 均以此为准（原设计未区分，实现时修正）。
+9. **审批改用宿主自带的 plan-review 原语**：原设计 §2.3 是"插件自绘的确认执行 N 次提交按钮"。客户端半边研究发现在 DSH 已有 `ctx.userQuestions.ask({... intent:{kind:'plan-review', approve}})`，且宿主自带渲染面板（`ui-user-questions/PlanReviewPanel`）。改为新增 `commit_agent_request_approval` 工具走该原语——**宿主所有、协议受控、展示内容即 digest 覆盖内容、零客户端代码**，比自绘按钮更符合"审批绑定内容且模型不可伪造"。业务 API 的 `approvePlan` 保留给程序化/集成入口。
+10. **工具可从调用会话的 cwd 兜底建任务**：原设计 §1.3 要求任务只由专用会话承载。在客户端入口（GitLens 按钮）落地前，工具会回退到调用会话在宿主 session store 里的权威 `cwd` 自动建任务，使功能在任何仓库会话中可用。专用会话路径仍是首选与 GitLens 入口的目标形态；worktree 始终由宿主会话记录决定，模型无法传路径。此偏差在客户端入口落地后应收紧为可配置项。
+11. **`approvedBy` 只是审计标签**：DSH 不提供进程内已认证用户身份，交互审批记为 `user:plan-review`（表示"经由宿主 plan-review 取得"），不宣称是可信身份授权。真正的控制仍是 digest 内容绑定。
 
 ### 13.4 已知限制与后续步骤
 
 - **真机联调已完成一轮**（2026-09-14，scratch `DSH_HOME` headless profile）：原样 mount 曾因 `inject` 缺 `agents` 直接 boot 失败 → 改为 `ctx.get('agents')` 惰性解析；`followup({text})` 形状错误 → 改为完整 `UserMessage`。修复后 mount、restrict（33→8）、guard 拒绝、专用会话活/冷可见、`ctx.provide` 跨插件、status→publish→approve→execute 真实提交均实测通过。仍未实测：`resume`、web 客户端 `ISessions.open`、cancel/reconcile、卸载 disposal、并发、Windows（见 `docs/P0-VERIFICATION.md` §7）。
-- **本插件客户端 UI（下一步首要）**：新增自带 `dsh.client`（platform web）的客户端入口，用 `registerGitCommitAction` 挂"规划并提交变更"按钮（组件内自绘 icon/文案与 inline 状态），用 `openTab({type:'diff', diff:{kind:'proposed', …}})` 展示计划 diff；`ctx.sessions.open?.(sessionId)` 做"返回来源会话"。不要引入 better-sidebar 的私有 React 组件。
+- **本插件客户端 UI（下一步首要）**，已拆解为三部分（`docs/P0-VERIFICATION.md` §8）：
+  1. 自带 `dsh.client`（platform web + `./client` 导出）手写单文件 lazy-CJS（React 走 baseline `require('react')`，无需打包器）；用 `registerGitCommitAction` 挂"规划并提交变更"按钮，组件内自绘 icon/文案与 inline 状态。**无未知契约**。
+  2. `openTab({type:'diff', diff:{kind:'proposed', …}})` 展示计划 diff；补丁已随工具结果 `presentationMeta` 下发，**无需 remote**。
+  3. "创建专用会话"必须从浏览器触发宿主侧 `AgentRegistry.create`，因此需要一个 `@Remote`（`@deepseek-ai/dsh-typert-protocol` + `TypertRemoteService`，客户端 `ctx.remote.$mount` 且要求 strict codec）。**风险点**：插件需自带该依赖与 `@deepseek-ai/cordis` peer，插件副本与宿主 gateway 的 symbols 是否互通**未验证**，必须真机验证；若不通，退路是改为"向当前会话注入一条用户消息"来触发，不引入 remote。
+  另外不要把 better-sidebar 的私有 React 组件引入本包。
 - better-sidebar 侧已交付分支 `feat/git-commit-action-seam` @ `edf6837`（本地未 push）：需要时由用户决定是否合并/发布。
 - P3：hunk 级分组、暂存区备份/重建、纯聊天审批协议。
 - Windows 换行/符号链接/权限位行为未验证。

@@ -44,7 +44,7 @@ function toolsFor(fixture: Fixture): { service: CommitAgentService; tools: HostT
   return { service, tools }
 }
 
-test('exactly eight tools are registered with well-formed definitions', () => {
+test('every declared tool is registered with a well-formed definition', () => {
   const tools = buildCommitAgentTools({ service: new CommitAgentService({ dataDir: '/tmp/unused' }), resolveWorkspace: async () => null })
   assert.deepEqual(
     tools.map((t) => t.name),
