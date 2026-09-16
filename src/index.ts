@@ -200,7 +200,7 @@ export function createCommitAgentPlugin(
       // Make sure the data directory is usable *before* creating a session, so
       // a bad dataDir cannot leave an orphaned session behind.
       await service.init()
-      // The nine tools are installed by the `agent/created` listener in
+      // The five tools are installed by the `agent/created` listener in
       // `apply`, matched on the reserved session-id prefix that `newSessionId`
       // mints. Nothing is installed here, so a session created by the plugin
       // and one created by the GitLens button take the exact same path.
@@ -369,7 +369,7 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
   const definitions = buildCommitAgentTools(deps)
 
   /**
-   * Install the nine tools into one commit-agent session's scope.
+   * Install the five tools into one commit-agent session.s scope.
    *
    * `agent/created` is emitted while the agent is being registered — before
    * `agent/session-start` and the first prompt assembly — for both `create` and

@@ -115,6 +115,18 @@ better-sidebar 拥有：GitLens 和 DiffPane。由其公开扩展 API 接入；�
 - `commit_agent_recent_commits`：读取少量提交风格参考。
 - `commit_agent_publish_plan`：提交分组意图，Host 验证并物化为可预览计划。
 
+**修订（2026-09-16，工具面精简）：** 上线版本将四个只读工具合并为单个
+`commit_agent_inspect`（`mode=status | diff | files | recent | reconcile`），
+`reconcile` 由独立工具改为 inspect 的模式；publish / request_approval /
+execute_plan / cancel_execution 四个生命周期工具保持独立，工具面由九个收敛
+为五个。经验教训：当时 dotfiles 首次计划失败，根因是模型把已 staged 的
+`cli/gitcmd.go` 放进了第二个提交，而 `reuse-existing-index` 策略要求所有
+staged 变更必须进入第一个提交；同一违规当时被重复报成
+`UNSTAGED_INDEX_SPLIT_UNSUPPORTED` 与 `UNSUPPORTED_HUNK_SPLIT` 两种 blocker，
+且 status 文本没有提前说明该约束。本次修订同时：去重为单一 blocker 代码并
+给出可执行建议（纳入首提交），并在 status 结果与渲染文本中显式暴露
+`indexRule`。
+
 不开放通用 bash、任意 Git 参数、任意 cwd、文件写入、网络或委派工具。仓库文本与 diff 中的指令仅作为数据，不改变任务和权限。
 
 工具通过精确 allowlist 和执行前 guard 限制。Git 参数数组由 Host 构造，禁用外部 diff、textconv、pager 与不必要的递归执行；清理会改变目标和行为的 Git 环境变量。路径验证需处理符号链接、字面量 pathspec、特殊字符、rename 原路径及读取边界。读取设文件数、字节、时间、步数预算，敏感文件默认不自动发给模型并解释排除原因。

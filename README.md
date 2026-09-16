@@ -65,15 +65,11 @@ calling the dedicated-session API on a host without one fails with a clear
 
 | Tool | Purpose |
 | --- | --- |
-| `commit_agent_status` | HEAD, branch, index state, in-progress operations, every pending change with a content-addressed `changeId`, existing plan revisions |
-| `commit_agent_diff` | exact diff for a plan commit, or the current reviewable diff; optionally narrowed to one change |
-| `commit_agent_read_context` | bounded file reads (secrets excluded with a reason, binaries skipped) |
-| `commit_agent_recent_commits` | recent subjects for message style |
+| `commit_agent_inspect` | the single read tool, `mode=status` (default: HEAD, branch, index state, index rule, in-progress operations, every pending change with a content-addressed `changeId`, existing plan revisions) / `mode=diff` (current or per-plan diff, optionally one change) / `mode=files` (bounded reads, secrets excluded with a reason) / `mode=recent` (subjects for style) / `mode=reconcile` (match real history against a plan) |
 | `commit_agent_publish_plan` | publish a new immutable plan revision; the host validates, computes every expected tree, returns the preview |
 | `commit_agent_request_approval` | ask the human to approve exactly one revision, through the host's own plan-review panel; the host records the decision |
 | `commit_agent_execute_plan` | execute a revision the **user** approved; the host verifies approval, snapshot and staged tree |
 | `commit_agent_cancel_execution` | request cancellation at the next safe boundary |
-| `commit_agent_reconcile` | match real history against a plan's expected trees without changing anything |
 
 There is no shell, no arbitrary git invocation, no `cwd`, no file write, no
 network and no delegation tool.
@@ -98,14 +94,14 @@ the commit row (next to the built-in Commit button; its tooltip reads
 worktree, seeds the planning request and submits it.
 
 An ordinary chat session does **not** see the commit tools, and cannot start
-this workflow by asking. The nine tools are installed into exactly one agent
+this workflow by asking. The five tools are installed into exactly one agent
 scope, the session the button creates — never into every session.
 
 ### Per-session tool injection
 
 DSH resolves a tool surface **per agent scope**: `register()` on a plugin's own
 context is visible to every session, while `register()` on an agent's
-`agent.ctx` is visible only to that agent. Mounting the nine tools globally was
+`agent.ctx` is visible only to that agent. Mounting the five tools globally was
 the original shortcut, and it put them in every session's model surface.
 
 Instead, the host half installs them on `agent/created` for agents whose session
@@ -116,11 +112,11 @@ through the public `ISessions.create({ sessionId })` contract; a session created
 through the business API's `startDedicatedSession` gets one from the same
 `newSessionId` default. Installation adds, in the target scope only:
 
-- the nine tool definitions,
+- the five tool definitions,
 - `restrict({ allow: [] })`, which hides the entire inherited surface (the
   global layer plus every preset/standing ancestor layer) and leaves only the
-  scope's own nine visible,
-- the terminal `guard`, which allow-lists the nine by name and fails closed.
+  scope's own five visible,
+- the terminal `guard`, which allow-lists the five by name and fails closed.
 
 `agent/created` fires during registration — before `agent/session-start` and the
 first prompt assembly — for both `create` and `resume`, so the first model
@@ -148,7 +144,7 @@ it grouped. The host-side `startDedicatedSession` API does the same through
 
 Either way the flow is the same:
 
-1. the agent calls `commit_agent_status`, reads the real diffs, and publishes a plan;
+1. the agent calls `commit_agent_inspect` (mode=status), reads the real diffs, and publishes a plan;
 2. the plan appears as a transcript card, and each commit can be opened as a
    proposed diff in the sidebar's DiffPane;
 3. the agent calls `commit_agent_request_approval` and you decide in the host's
@@ -166,7 +162,7 @@ tables.
 import { apply as mount } from 'dsh-git-commit-agent'
 
 const plugin = mount(ctx, { dataDir: '~/.dsh/git-commit-agent' })
-plugin.api.toolNames            // the nine tool names
+plugin.api.toolNames            // the five tool names
 plugin.api.systemPrompt()
 await plugin.api.startDedicatedSession({ workspacePath, sourceSessionId, userConstraints })
 await plugin.api.openTask({ sourceSessionId, agentSessionId: null, workspaceRoot })
@@ -197,7 +193,7 @@ src/core/                     host-agnostic, fully testable
   service.ts                  orchestration used by the tools
 src/host/                     structural mirrors of the verified DSH contract
   types.ts                    host service faces (no compile-time host dependency)
-  tools.ts                    the nine ToolDefinition objects + per-session scope install
+  tools.ts                    the five ToolDefinition objects + per-session scope install
   session.ts                  dedicated normal session, prompts
 src/index.ts                  Cordis plugin: apply(ctx, config) + business API
 ```

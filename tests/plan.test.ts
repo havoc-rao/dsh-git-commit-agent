@@ -224,7 +224,15 @@ test('a non-empty index forces the reuse strategy and the first commit', async (
       },
       { indexStrategy: 'reuse-existing-index' },
     )
-    assert.ok(stagedElsewhere.blockers.some((b) => b.code === 'UNSUPPORTED_HUNK_SPLIT' || b.code === 'UNSTAGED_INDEX_SPLIT_UNSUPPORTED'))
+    // One violation, one code: a staged change placed after the first commit is
+    // exactly UNSTAGED_INDEX_SPLIT_UNSUPPORTED. It must NOT be re-reported as
+    // UNSUPPORTED_HUNK_SPLIT as well (that double-reporting is what made the
+    // original dotfiles retry confusing).
+    const codes = stagedElsewhere.blockers.map((b) => b.code)
+    assert.ok(codes.includes('UNSTAGED_INDEX_SPLIT_UNSUPPORTED'), `expected the staged-split blocker, got ${codes.join(', ')}`)
+    assert.ok(!codes.includes('UNSUPPORTED_HUNK_SPLIT'), `the same violation must not be double-reported, got ${codes.join(', ')}`)
+    const stagedBlocker = stagedElsewhere.blockers.find((b) => b.code === 'UNSTAGED_INDEX_SPLIT_UNSUPPORTED')
+    assert.match(stagedBlocker?.message ?? '', /first commit/)
   } finally {
     await fixture.cleanup()
   }

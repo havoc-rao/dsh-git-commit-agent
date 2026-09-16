@@ -97,10 +97,10 @@ test('agents are resolved lazily through ctx.get at call time', async () => {
       sourceSessionId: 'session-source',
     })
     assert.equal(created, 1)
-    // The reserved prefix is what makes the host install the nine tools into
+    // The reserved prefix is what makes the host install the five tools into
     // this session's scope (see `isCommitAgentSession`).
     assert.match(started.sessionId, /^session-git-commit-[0-9a-f-]{36}$/)
-    assert.ok(started.prompt.includes('commit_agent_status'))
+    assert.ok(started.prompt.includes('commit_agent_inspect'))
     await plugin.dispose()
   } finally {
     await fixture.cleanup()

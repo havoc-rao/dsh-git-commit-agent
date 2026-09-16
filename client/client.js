@@ -39,7 +39,7 @@ window.__ModuleLoader__.load({
      * Reserved session-id prefix the host half matches on.
      *
      * DSH resolves a tool surface per agent scope, so a globally registered
-     * tool would appear in every session. Instead the host installs the nine
+     * tool would appear in every session. Instead the host installs the five
      * commit tools into exactly the agents whose id starts with this prefix,
      * and this button preallocates such an id through
      * `sessions.create({ sessionId })`.
@@ -90,8 +90,8 @@ window.__ModuleLoader__.load({
         'branch: ' + (branch || '(detached)'),
         '',
         '要求：',
-        '1. 先调用 commit_agent_status 读取真实状态与 changeId。changeId 是内容寻址的，文件一变就失效，必须重新读取。',
-        '2. 用 commit_agent_diff / commit_agent_read_context 看真实改动，不要从路径或扩展名猜内容。',
+        '1. 先调用 commit_agent_inspect（默认 mode=status）读取真实状态与 changeId。changeId 是内容寻址的，文件一变就失效，必须重新读取；若状态显示已有暂存内容，所有 staged 变更必须进入第一个提交。',
+        '2. 用 commit_agent_inspect mode=diff / mode=files 看真实改动，不要从路径或扩展名猜内容。',
         '3. 用 commit_agent_publish_plan 发布计划：每个待提交变更必须恰好出现一次；未纳入的必须放进 excludedChanges 并给出理由。',
         '4. 计划没有 blocker 后调用 commit_agent_request_approval 让我审批。',
         '5. 只有我批准之后才能调用 commit_agent_execute_plan。不要自己声称我已批准。',
@@ -181,7 +181,7 @@ window.__ModuleLoader__.load({
       }
       const workspaceId = workspaceIdForPath(ctx, worktree)
       // Preallocate the id so the host knows this is a commit session and
-      // installs the nine tools into exactly this agent's scope.
+      // installs the five tools into exactly this agent's scope.
       const requestedId = newSessionId()
       let sessionId
       if (workspaceId === undefined) {

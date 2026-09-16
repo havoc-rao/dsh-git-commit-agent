@@ -221,11 +221,11 @@ was not booted), user-rejected approval, cancel/reconcile, uninstall
 3. The eight tools were registered as global tools, so an unrelated session
    could also see them. The bounded risk is the same as (2): execution needs an
    approval bound to a plan digest, and planning never writes to the repository.
-   **Superseded:** the plugin now installs the nine tools into a single commit
+   **Superseded:** the plugin now installs the five tools into a single commit
    session's own agent scope (`installCommitAgentScope`, matched on the reserved
    `session-git-commit-` session-id prefix), so no other session sees them.
    `restrict({ allow: [] })` hides the inherited surface and the terminal guard
-   still allow-lists the nine.
+   still allow-lists the five.
 
 ### 7.1 Post-fix re-verification (round 2)
 
@@ -374,14 +374,14 @@ work in three public client calls instead of a host round-trip:
    the "never claim the user approved" rule spelled out.
 
 This traded one designed property for reachability: the session is a normal one,
-so the agent's tool surface is not restricted to the nine commit tools (the
+so the agent's tool surface is not restricted to the five commit tools (the
 dedicated host-created session with `restrict` + `guard` remains available
 through the business API). The control that matters is unchanged — execution
 still requires an approval recorded host-side against a plan digest.
 
 **Superseded:** the trade is gone. The client now preallocates a reserved
 `session-git-commit-<uuid>` id through `sessions.create({ sessionId })`, and the
-host half installs the nine tools into exactly that agent's scope on
+host half installs the five tools into exactly that agent's scope on
 `agent/created`. A plain chat session no longer sees the commit tools at all, so
 the `restrict({ allow: [] })` + `guard` surface is what the button session runs
 with too.

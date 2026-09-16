@@ -6,9 +6,10 @@ exact plan revision does.
 
 ## 1. No general-purpose privilege
 
-- The plugin exposes **nine closed tools** (`src/host/tools.ts`). There is no
-  shell tool, no arbitrary git invocation, no `cwd`, no file write, no network
-  and no delegation.
+- The plugin exposes **five closed tools** (`src/host/tools.ts`: one read tool
+  `commit_agent_inspect` with status/diff/files/recent/reconcile modes, plus
+  publish, approval, execute and cancel). There is no shell tool, no arbitrary
+  git invocation, no `cwd`, no file write, no network and no delegation.
 - Every git argument array is constructed by `GitRunner` (`src/core/git/runner.ts`).
   No caller can supply a subcommand or an option.
 - Processes are spawned with `execFile` (never a shell).
@@ -21,11 +22,11 @@ exact plan revision does.
   user's identity, hooks and signing behave exactly as in their own terminal.
 - Analysis never executes repository-supplied programs: hashing uses
   `git hash-object --no-filters`; diffs use `--no-ext-diff --no-textconv`.
-- The nine tools are installed into a commit session's own agent scope
+- The five tools are installed into a commit session's own agent scope
   (`installCommitAgentScope`): the scope's own registrations are the only visible
   tools, `restrict({ allow: [] })` hides the whole inherited surface (global plus
   every preset/standing ancestor layer), and a terminal `guard` allow-lists the
-  nine by name and **fails closed** if it cannot read the tool name from the
+  five by name and **fails closed** if it cannot read the tool name from the
   execution record.
 - Repository text and diffs are data. The system prompt says so explicitly.
 
@@ -75,13 +76,17 @@ Sequence per execution (`src/core/plan/executor.ts`):
   so the user's staged work lands in that commit. The validator **blocks**
   (`UNSTAGED_INDEX_SPLIT_UNSUPPORTED`) any plan that omits an already-staged
   change, because omitting it cannot be honoured without splitting the index.
+  This is the single code for the rule: a staged change placed in a later commit
+  is the same violation and is never re-reported under another code. The status
+  projection surfaces the rule up front (`indexRule`), so a plan does not have
+  to fail at publish time to learn it.
 - The plugin never runs `git reset`, and never re-collects changes with `git add -A`.
 
 ## 5. What v1 refuses (with a coded reason)
 
 `UNSUPPORTED_REPOSITORY_STATE` (merge / rebase / cherry-pick / revert / bisect),
 `UNSUPPORTED_UNMERGED`, `UNSUPPORTED_SUBMODULE`, `UNSUPPORTED_TYPECHANGE`,
-`UNSUPPORTED_HUNK_SPLIT` (one path in two commits), `EMPTY_TREE_COMMIT`,
+`UNSUPPORTED_HUNK_SPLIT` (one path in two commits — distinct from the staged-index rule), `EMPTY_TREE_COMMIT`,
 `UNCOVERED_CHANGE`, `MISSING_EXCLUSION_REASON`, `INDEX_STRATEGY_MISMATCH`,
 `DEPENDENCY_CYCLE` / `DEPENDENCY_ORDER`, `UNKNOWN_CHANGE` / `DUPLICATE_CHANGE`,
 `BUDGET_EXCEEDED`.
@@ -167,7 +172,7 @@ bound what "the user approved" means:
    `approval.planDigest === plan.planDigest === recompute(plan)` and the plan has
    no blockers. A caller can approve, but it cannot make the executor commit
    something different from what the approval covers.
-2. **The nine tools are scoped to commit sessions, not global.** `apply` never
+2. **The five tools are scoped to commit sessions, not global.** `apply` never
    registers them on its own context; it installs them on `agent/created` for
    agents whose session id carries the reserved `session-git-commit-` prefix
    (the GitLens button preallocates one through `ISessions.create`). An unrelated
@@ -176,12 +181,12 @@ bound what "the user approved" means:
    but planning never writes to the repository and execution still requires an
    approval bound to a plan digest.
 3. **`restrict` exempts the scope's own registrations.** Verified in the DSH
-   source and observed live. Because the nine are now the scope's own
+   source and observed live. Because the five are now the scope's own
    registrations, the restriction is `allow: []` (hide everything inherited) and
    the terminal guard is what keeps the surface closed. The guard is not
    optional.
 4. **Uninstall must dispose.** `apply` wires `ctx.effect(() => () => { disposeTools(); plugin.dispose() })`
-   so the nine tools and any created session are released. Live uninstall was
+   so the five tools and any created session are released. Live uninstall was
    not exercised.
 5. **`approvedBy` is an audit label, not an identity.** Interactive approval goes
    through the host's `plan-review` question intent and the record is stamped

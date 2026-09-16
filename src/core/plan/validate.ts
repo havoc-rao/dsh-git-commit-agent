@@ -243,7 +243,9 @@ export function normalizeAndValidatePlan(
     if (commitIds.size > 1) {
       blockers.push({
         code: 'UNSUPPORTED_HUNK_SPLIT',
-        message: `path ${path} is split across commits ${[...commitIds].join(', ')}; v1 stages whole files only`,
+        message:
+          `path ${path} is split across commits ${[...commitIds].join(', ')}; v1 stages whole files only, `
+          + 'keep every change of this path in a single commit',
         subject: path,
       })
     }
@@ -319,6 +321,9 @@ export function normalizeAndValidatePlan(
   }
 
   // Reuse-existing-index: everything already staged lands in the first commit.
+  // This is the ONLY check for the rule; a staged change placed anywhere else is
+  // the same single violation, so it must never be reported a second time under
+  // another code (it used to be re-reported as UNSUPPORTED_HUNK_SPLIT).
   if (options.indexStrategy === 'reuse-existing-index') {
     const first = assignedCommits[0]
     const firstSet = new Set(first?.changes ?? [])
@@ -328,26 +333,11 @@ export function normalizeAndValidatePlan(
         blockers.push({
           code: 'UNSTAGED_INDEX_SPLIT_UNSUPPORTED',
           message:
-            `change ${entry.path} is already staged and would land in the first commit, `
-            + 'but the plan does not include it there; v1 will not split the existing index',
+            `change ${entry.path} is already staged but the plan does not put it in the first commit. `
+            + 'With the reuse-existing-index strategy every staged change lands in the first commit; '
+            + `include change ${entry.changeId} in the first commit instead`,
           subject: entry.changeId,
         })
-      }
-    }
-  }
-
-  // Unsupported layers in later commits under reuse strategy.
-  if (options.indexStrategy === 'reuse-existing-index') {
-    for (const commit of assignedCommits.slice(1)) {
-      for (const changeId of commit.changes) {
-        const record = known.get(changeId)
-        if (record !== undefined && record.layer === 'index') {
-          blockers.push({
-            code: 'UNSUPPORTED_HUNK_SPLIT',
-            message: `change ${record.path} is an index-layer change placed after the first commit`,
-            subject: changeId,
-          })
-        }
       }
     }
   }

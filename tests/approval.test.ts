@@ -53,7 +53,7 @@ async function publishOne(
   tools: readonly HostToolDefinition[],
   exec: HostToolRunContext,
 ): Promise<{ taskId: string; planId: string; revision: number; planDigest: string }> {
-  const status = (await toolNamed(tools, 'commit_agent_status').execute({}, exec)) as Record<string, unknown>
+  const status = (await toolNamed(tools, 'commit_agent_inspect').execute({}, exec)) as Record<string, unknown>
   const changeId = (status['changes'] as Array<Record<string, unknown>>)[0]?.['changeId'] as string
   const published = (await toolNamed(tools, 'commit_agent_publish_plan').execute(
     { commits: [{ message: 'feat: add the thing', changes: [changeId] }] },
@@ -157,7 +157,7 @@ test('approving an older revision after a newer one exists is refused', async ()
     await writeFile(fixture.root, 'src/thing.ts', 'export const thing = 1\n')
     const { tools } = toolsWithAsker(fixture, () => ({ approved: true, selected: ['Approve'] }))
     const exec = execContext()
-    const status = (await toolNamed(tools, 'commit_agent_status').execute({}, exec)) as Record<string, unknown>
+    const status = (await toolNamed(tools, 'commit_agent_inspect').execute({}, exec)) as Record<string, unknown>
     const taskId = status['taskId'] as string
     const changeId = (status['changes'] as Array<Record<string, unknown>>)[0]?.['changeId'] as string
 
@@ -192,7 +192,7 @@ test('a plan with blockers cannot be submitted for approval', async () => {
     await writeFile(fixture.root, 'b.txt', 'b\n')
     const { tools } = toolsWithAsker(fixture, () => ({ approved: true, selected: ['Approve'] }))
     const exec = execContext()
-    const status = (await toolNamed(tools, 'commit_agent_status').execute({}, exec)) as Record<string, unknown>
+    const status = (await toolNamed(tools, 'commit_agent_inspect').execute({}, exec)) as Record<string, unknown>
     const changeId = (status['changes'] as Array<Record<string, unknown>>)[0]?.['changeId'] as string
     // Leave one change uncovered -> blocker.
     const published = (await toolNamed(tools, 'commit_agent_publish_plan').execute(
@@ -244,7 +244,7 @@ test('the review document is deterministic and carries the digest and exclusions
     const service = new CommitAgentService({ dataDir: fixture.dataDir })
     const tools = buildCommitAgentTools({ service, resolveWorkspace: async () => fixture.root })
     const exec = execContext()
-    const status = (await toolNamed(tools, 'commit_agent_status').execute({}, exec)) as Record<string, unknown>
+    const status = (await toolNamed(tools, 'commit_agent_inspect').execute({}, exec)) as Record<string, unknown>
     const entries = status['changes'] as Array<Record<string, unknown>>
     const published = (await toolNamed(tools, 'commit_agent_publish_plan').execute(
       {
