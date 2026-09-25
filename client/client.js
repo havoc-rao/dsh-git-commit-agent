@@ -345,17 +345,18 @@ window.__ModuleLoader__.load({
       return meta
     }
 
-    /** Short Chinese label for a change status. */
-    const STATUS_LABELS = {
-      added: '新增',
-      modified: '修改',
-      deleted: '删除',
-      renamed: '重命名',
-      copied: '复制',
-      typechange: '类型变更',
-      unmerged: '冲突',
-      untracked: '未跟踪',
-      unknown: '未知',
+    /** Git/VSCode status symbols (the characters the source-control pane
+     *  shows; `status -s` porcelain uses the same letters). */
+    const STATUS_SYMBOLS = {
+      added: 'A',
+      modified: 'M',
+      deleted: 'D',
+      renamed: 'R',
+      copied: 'C',
+      typechange: 'T',
+      unmerged: 'U',
+      untracked: '?',
+      unknown: '!',
     }
 
     /** Readable layer label. */
@@ -486,13 +487,14 @@ window.__ModuleLoader__.load({
                 'ul',
                 { key: 'files', className: 'dsh-gca-files' },
                 files.map(function (change) {
-                  const label = STATUS_LABELS[change.status] || String(change.status || '?')
+                  // VSCode-style status symbol + layer, e.g. `M 未暂存`.
+                  const symbol = STATUS_SYMBOLS[change.status] || '?'
                   const rename = change.oldPath ? String(change.oldPath) + ' → ' : ''
                   const marker = change.binary === true ? ' [二进制]' : ''
                   return h(
                     'li',
                     { key: change.changeId || change.path },
-                    label + ' · ' + layerLabel(change.layer) + ' · ' + rename + change.path + marker,
+                    symbol + ' ' + layerLabel(change.layer) + ' · ' + rename + change.path + marker,
                   )
                 }),
               ),

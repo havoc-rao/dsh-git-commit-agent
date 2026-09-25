@@ -22,6 +22,39 @@ export type ChangeStatus =
   | 'untracked'
   | 'unknown'
 
+/**
+ * One-letter git/VSCode status symbol for a change status (the character
+ * VSCode's source-control decorations show next to a file). `untracked`
+ * renders as `?` (git's own glyph); `unknown` as `!`.
+ */
+export function statusSymbol(status: ChangeStatus): string {
+  switch (status) {
+    case 'added': return 'A'
+    case 'modified': return 'M'
+    case 'deleted': return 'D'
+    case 'renamed': return 'R'
+    case 'copied': return 'C'
+    case 'typechange': return 'T'
+    case 'unmerged': return 'U'
+    case 'untracked': return '?'
+    case 'unknown': return '!'
+  }
+}
+
+/**
+ * The same change in porcelain-v1 XY form: the first slot is the **index**
+ * (staged) state, the second the **worktree** (unstaged) state. An index
+ * record renders `M `, a worktree record ` M` and an untracked record `??` —
+ * so two records of one partially staged path spell `MM` side by side,
+ * exactly like `git status --porcelain`.
+ */
+export function statusXy(status: ChangeStatus, layer: ChangeLayer): string {
+  const symbol = statusSymbol(status)
+  if (layer === 'untracked') return '??'
+  if (layer === 'index') return `${symbol} `
+  return ` ${symbol}`
+}
+
 /** File mode before/after, as git's 6-digit octal strings. */
 export interface ChangeMode {
   old?: string

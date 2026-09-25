@@ -11,6 +11,7 @@
  *    so what is approved is what is displayed.
  */
 import type { PlanDeltaEntry, PlanVersion } from './types.js'
+import { statusXy } from './types.js'
 
 /** Maximum characters of the generated review document. */
 const MAX_DETAIL_CHARS = 24_000
@@ -81,6 +82,15 @@ export function buildPlanReview(plan: PlanVersion): PlanReview {
   if (detail === undefined) {
     lines.push('- _File-level detail is unavailable for this revision (stored before review details existed)._')
   }
+  // File rows below use git/VSCode status symbols in porcelain XY form: the
+  // first slot is the staged (index) state, the second the unstaged
+  // (worktree) state — `A` added, `M` modified, `D` deleted, `R` renamed,
+  // `C` copied, `T` typechange, `U` unmerged, `?` untracked. Two records of
+  // one partially staged path spell `MM`.
+  if (detail !== undefined) {
+    lines.push('')
+    lines.push('_Status symbols: `XY` = staged/unstaged; A added · M modified · D deleted · R renamed · C copied · T typechange · U unmerged · ? untracked_')
+  }
   lines.push('')
 
   for (const commit of plan.commits) {
@@ -104,7 +114,7 @@ export function buildPlanReview(plan: PlanVersion): PlanReview {
       for (const change of shown) {
         const rename = change.oldPath === undefined ? '' : ` (from \`${change.oldPath}\`)`
         const kind = change.binary ? ' [binary]' : change.symlink ? ' [symlink]' : ''
-        lines.push(`- \`${change.path}\` — ${change.status} [${change.layer}]${kind}${rename}`)
+        lines.push(`- \`${statusXy(change.status, change.layer)}\` ${change.path}${kind}${rename}`)
       }
       if (commitDetail.changes.length > shown.length) {
         lines.push(`- … and ${commitDetail.changes.length - shown.length} more`)
