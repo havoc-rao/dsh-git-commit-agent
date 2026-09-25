@@ -158,8 +158,9 @@ Either way the flow is the same:
    (`commit_agent_diff`) and file contents (`commit_agent_read_files`), and
    prepares a plan (`commit_agent_prepare_plan`);
 2. the plan appears as a transcript card: a summary (revision, commit count,
-   file count, per-commit `+/-`), expandable per-commit file lists with
-   status/layer/rename, exclusions and warnings, a **revision delta** ("what
+   file count, per-commit `+/-`), expandable per-commit file lists marked with
+   **git/VSCode status symbols** (`M`/`A`/`D`/`R`/`C`/`T`/`U`/`?` + staged/
+   unstaged layer), exclusions and warnings, a **revision delta** ("what
    changed since rev N": files moved between commits, reworded messages, new
    exclusions), and a collapsed technical section (plan id, digest, trees).
    Each commit opens as a **versioned** proposed diff in the sidebar's
@@ -170,8 +171,10 @@ Either way the flow is the same:
    stays a read-only snapshot; stats and file lists always come from the
    untruncated `--numstat`);
 3. the agent calls `commit_agent_apply_plan` and you decide in the host's
-   plan-review panel — its document lists paths, stat and trees from the
-   plan's frozen review detail, never live worktree reads;
+   plan-review panel — its document lists each file with a **porcelain-XY
+   status symbol** (first slot staged, second unstaged; `??` untracked), the
+   stat and the trees, all from the plan's frozen review detail, never live
+   worktree reads;
 4. only after your approval does the host execute — the same call then returns
    the execution result (commits landed, or why it stopped).
 
