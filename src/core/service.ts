@@ -710,6 +710,19 @@ export class CommitAgentService {
     return (await this.requireTask(taskId)).plans
   }
 
+  /**
+   * The newest plan revision number of a task.
+   *
+   * Authoritative for approvals: only the newest revision can be approved, and
+   * this is the value `approvePlan` enforces. Tools pre-check it before showing
+   * the approval panel so the user never reviews a revision that can no longer
+   * be approved.
+   */
+  async latestRevision(taskId: string): Promise<number> {
+    await this.init()
+    return (await this.requireTask(taskId)).task.latestRevision
+  }
+
   /** Look up a task, throwing a coded error when absent. */
   private async requireTask(taskId: string): Promise<StoredTask> {
     await this.init()

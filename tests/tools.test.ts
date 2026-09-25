@@ -14,6 +14,8 @@ import {
   COMMIT_AGENT_TOOL_NAMES,
   installCommitAgentScope,
   isCommitAgentSession,
+  type UserApprovalDecision,
+  type UserApprovalPrompt,
 } from '../src/host/tools.js'
 import type { HostToolDefinition, HostToolRunContext } from '../src/host/types.js'
 import { createInitialisedFixture, git, writeFile, type Fixture } from './helpers/fixture.js'
@@ -35,11 +37,15 @@ function toolNamed(tools: readonly HostToolDefinition[], name: string): HostTool
 }
 
 /** Build tools wired to a service for one fixture. */
-function toolsFor(fixture: Fixture): { service: CommitAgentService; tools: HostToolDefinition[] } {
+function toolsFor(
+  fixture: Fixture,
+  askUserApproval?: (prompt: UserApprovalPrompt) => Promise<UserApprovalDecision>,
+): { service: CommitAgentService; tools: HostToolDefinition[] } {
   const service = new CommitAgentService({ dataDir: fixture.dataDir })
   const tools = buildCommitAgentTools({
     service,
     resolveWorkspace: async () => fixture.root,
+    ...(askUserApproval === undefined ? {} : { askUserApproval }),
   })
   return { service, tools }
 }
@@ -161,49 +167,48 @@ test('commit_agent_inspect status exposes the staged-changes-must-enter-first-co
   }
 })
 
-test('publish_plan then execute_plan commits through the tool surface', async () => {
+test('prepare_plan then apply_plan commits through the tool surface', async () => {
   const fixture = await createInitialisedFixture()
   try {
     await writeFile(fixture.root, 'src/feature.ts', 'export const feature = 1\n')
-    const { service, tools } = toolsFor(fixture)
+    const { service, tools } = toolsFor(fixture, async () => ({ approved: true, selected: ['Approve'] }))
     const exec = execContext()
 
     const status = (await toolNamed(tools, 'commit_agent_inspect').execute({}, exec)) as Record<string, unknown>
     const taskId = status['taskId'] as string
     const changeId = (status['changes'] as Array<Record<string, unknown>>)[0]?.['changeId'] as string
 
-    const published = (await toolNamed(tools, 'commit_agent_publish_plan').execute(
+    const prepared = (await toolNamed(tools, 'commit_agent_prepare_plan').execute(
       { commits: [{ message: 'feat: add feature module', changes: [changeId] }] },
       exec,
     )) as Record<string, unknown>
-    const plan = published['plan'] as Record<string, unknown>
+    const plan = prepared['plan'] as Record<string, unknown>
     assert.deepEqual(plan['blockers'], [])
 
-    // The model cannot execute before the user approves.
-    await assert.rejects(() =>
-      Promise.resolve(
-        toolNamed(tools, 'commit_agent_execute_plan').execute(
+    // On a host without an approval surface the model cannot apply anything:
+    // the tool refuses instead of self-approving.
+    const bare = toolsFor(fixture)
+    await assert.rejects(
+      () => Promise.resolve(
+        toolNamed(bare.tools, 'commit_agent_apply_plan').execute(
           { planId: plan['planId'], revision: plan['revision'] },
           exec,
         ),
       ),
+      (error: unknown) => (error as { code?: string }).code === 'BAD_ARGUMENT',
     )
 
-    await service.approvePlan({
-      taskId,
-      planId: plan['planId'] as string,
-      revision: plan['revision'] as number,
-      planDigest: plan['planDigest'] as string,
-      requestId: 'req-tool',
-      approvedBy: 'user:test',
-    })
-
-    const executed = (await toolNamed(tools, 'commit_agent_execute_plan').execute(
+    // One apply call: the human approves, the host executes.
+    const applied = (await toolNamed(tools, 'commit_agent_apply_plan').execute(
       { planId: plan['planId'], revision: plan['revision'] },
       exec,
     )) as Record<string, unknown>
-    assert.equal(executed['outcome'], 'completed')
-    assert.equal((executed['commits'] as unknown[]).length, 1)
+    assert.equal(applied['approved'], true)
+    assert.equal(applied['outcome'], 'completed')
+    assert.equal((applied['commits'] as unknown[]).length, 1)
+    assert.equal(git(fixture.root, ['log', '--format=%s', '-n1']).trim(), 'feat: add feature module')
+    const stored = await service.plansOf(taskId)
+    assert.equal(stored.find((p) => p.planId === plan['planId'])?.status, 'completed')
   } finally {
     await fixture.cleanup()
   }
@@ -220,14 +225,14 @@ test('a tool call from a session with no bound worktree fails with a clear error
   }
 })
 
-test('inspect mode=files excludes secret-looking files with a reason', async () => {
+test('read_files excludes secret-looking files with a reason', async () => {
   const fixture = await createInitialisedFixture()
   try {
     await writeFile(fixture.root, '.env', 'SECRET=1\n')
     await writeFile(fixture.root, 'src/app.ts', 'export const app = 1\n')
     const { tools } = toolsFor(fixture)
-    const result = (await toolNamed(tools, 'commit_agent_inspect').execute(
-      { mode: 'files', paths: ['.env', 'src/app.ts'] },
+    const result = (await toolNamed(tools, 'commit_agent_read_files').execute(
+      { paths: ['.env', 'src/app.ts'] },
       execContext(),
     )) as Record<string, unknown> & { files: Array<{ path: string; content: string | null; excludedReason: string | null }> }
     assert.equal(result['kind'], 'files')
@@ -241,12 +246,12 @@ test('inspect mode=files excludes secret-looking files with a reason', async () 
   }
 })
 
-test('inspect mode=files without paths fails with a clear error', async () => {
+test('read_files without paths fails with a clear error', async () => {
   const fixture = await createInitialisedFixture()
   try {
     const { tools } = toolsFor(fixture)
     await assert.rejects(
-      () => Promise.resolve(toolNamed(tools, 'commit_agent_inspect').execute({ mode: 'files' }, execContext())),
+      () => Promise.resolve(toolNamed(tools, 'commit_agent_read_files').execute({}, execContext())),
       (error: unknown) => (error as { code?: string }).code === 'BAD_ARGUMENT',
     )
   } finally {
@@ -254,7 +259,7 @@ test('inspect mode=files without paths fails with a clear error', async () => {
   }
 })
 
-test('inspect serves diff, recent and reconcile modes', async () => {
+test('inspect serves recent and reconcile; diff is a dedicated tool', async () => {
   const fixture = await createInitialisedFixture()
   try {
     await writeFile(fixture.root, 'a.txt', 'a\n')
@@ -264,10 +269,7 @@ test('inspect serves diff, recent and reconcile modes', async () => {
     const status = (await toolNamed(tools, 'commit_agent_inspect').execute({}, exec)) as Record<string, unknown>
     const changeId = (status['changes'] as Array<Record<string, unknown>>)[0]?.['changeId'] as string
 
-    const diff = (await toolNamed(tools, 'commit_agent_inspect').execute(
-      { mode: 'diff', changeId },
-      exec,
-    )) as Record<string, unknown>
+    const diff = (await toolNamed(tools, 'commit_agent_diff').execute({ changeId }, exec)) as Record<string, unknown>
     assert.equal(diff['kind'], 'diff')
     assert.match(diff['patch'] as string, /a\.txt/)
 
@@ -275,19 +277,25 @@ test('inspect serves diff, recent and reconcile modes', async () => {
     assert.equal(recent['kind'], 'recent')
     assert.ok((recent['commits'] as unknown[]).length >= 1, 'the fixture has an initial commit')
 
-    const published = (await toolNamed(tools, 'commit_agent_publish_plan').execute(
+    const published = (await toolNamed(tools, 'commit_agent_prepare_plan').execute(
       { commits: [{ message: 'feat: add a', changes: [changeId] }] },
       exec,
     )) as Record<string, unknown>
     const plan = published['plan'] as Record<string, unknown>
+
+    // Plan preview: commit_agent_diff renders each planned commit's diff.
+    const preview = (await toolNamed(tools, 'commit_agent_diff').execute({ planId: plan['planId'] }, exec)) as Record<string, unknown>
+    assert.equal(preview['kind'], 'diff')
+    assert.match(preview['patch'] as string, /### c1/)
 
     const reconciled = (await toolNamed(tools, 'commit_agent_inspect').execute(
       { mode: 'reconcile', planId: plan['planId'], revision: plan['revision'] },
       exec,
     )) as Record<string, unknown>
     assert.equal(reconciled['kind'], 'reconcile')
-    assert.deepEqual(reconciled['landed'], [], 'an unpublished plan has no landed commits')
+    assert.deepEqual(reconciled['landed'], [], 'a not-yet-executed plan has no landed commits')
 
+    // reconcile requires an exact revision; there is no "newest" default.
     await assert.rejects(
       () => Promise.resolve(toolNamed(tools, 'commit_agent_inspect').execute({ mode: 'reconcile' }, exec)),
       (error: unknown) => (error as { code?: string }).code === 'BAD_ARGUMENT',
@@ -297,6 +305,12 @@ test('inspect serves diff, recent and reconcile modes', async () => {
       () => Promise.resolve(toolNamed(tools, 'commit_agent_inspect').execute({ mode: 'run' }, exec)),
       (error: unknown) => (error as { code?: string }).code === 'BAD_ARGUMENT',
     )
+
+    // The status render carries the published plan's digest, not a placeholder.
+    const statusAfter = (await toolNamed(tools, 'commit_agent_inspect').execute({ mode: 'status' }, exec)) as Record<string, unknown>
+    const statusText = toolNamed(tools, 'commit_agent_inspect').output.render({}, statusAfter).map((b) => b.text).join('\n')
+    assert.match(statusText, /digest [0-9a-f]{16,}/)
+    assert.ok(!statusText.includes('digest undefined'), 'the plan digest must be rendered from the status projection')
   } finally {
     await fixture.cleanup()
   }
@@ -308,7 +322,7 @@ test('the tool layer rejects path traversal', async () => {
     const { tools } = toolsFor(fixture)
     await assert.rejects(() =>
       Promise.resolve(
-        toolNamed(tools, 'commit_agent_inspect').execute({ mode: 'files', paths: ['../../../etc/passwd'] }, execContext()),
+        toolNamed(tools, 'commit_agent_read_files').execute({ paths: ['../../../etc/passwd'] }, execContext()),
       ),
     )
   } finally {
