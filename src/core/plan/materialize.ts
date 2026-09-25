@@ -16,7 +16,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GitCommitError } from '../errors.js'
-import type { ChangeRecord, IndexStrategy, PlanBlocker, PlannedCommit, Snapshot } from '../types.js'
+import type { ChangeRecord, DiffStat, IndexStrategy, PlanBlocker, PlannedCommit, Snapshot } from '../types.js'
 import { findChange } from '../git/snapshot.js'
 import type { GitRunner } from '../git/runner.js'
 
@@ -194,4 +194,42 @@ export async function treeDiff(
   const full = result.stdout
   if (full.length <= maxBytes) return { patch: full.toString('utf8'), truncated: false }
   return { patch: full.subarray(0, maxBytes).toString('utf8'), truncated: true }
+}
+
+/**
+ * Authoritative diff stat between two trees.
+ *
+ * `--numstat` output is line-based and tiny, so the counts are never subject to
+ * the byte cap that truncates a patch — a truncated preview must not claim to
+ * be the full change. Binary rows report `-` for both counts and still count
+ * as one file.
+ */
+export async function treeNumstat(
+  runner: GitRunner,
+  baseTree: string,
+  targetTree: string,
+  options: { paths?: readonly string[]; signal?: AbortSignal } = {},
+): Promise<DiffStat> {
+  const args = ['diff', '--numstat', '--no-ext-diff', '--no-textconv', baseTree, targetTree]
+  if (options.paths !== undefined && options.paths.length > 0) args.push('--', ...options.paths)
+  const result = await runner.exec(args, {
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    allowFailure: true,
+    timeoutMs: 60_000,
+  })
+  let files = 0
+  let additions = 0
+  let deletions = 0
+  for (const line of result.stdout.toString('utf8').split('\n')) {
+    if (line.trim() === '') continue
+    const [addRaw, delRaw] = line.split('\t')
+    if (addRaw === undefined || delRaw === undefined) continue
+    const add = addRaw === '-' ? 0 : Number(addRaw)
+    const del = delRaw === '-' ? 0 : Number(delRaw)
+    if (Number.isNaN(add) || Number.isNaN(del)) continue
+    files += 1
+    additions += add
+    deletions += del
+  }
+  return { files, additions, deletions }
 }

@@ -10,7 +10,7 @@
  *  - the text shown to the user is the same content the approval digest covers,
  *    so what is approved is what is displayed.
  */
-import type { PlanVersion } from './types.js'
+import type { PlanDeltaEntry, PlanVersion } from './types.js'
 
 /** Maximum characters of the generated review document. */
 const MAX_DETAIL_CHARS = 24_000
@@ -32,6 +32,25 @@ function shortOid(oid: string | null): string {
   return oid === null || oid === '' ? '(unborn)' : oid.slice(0, 12)
 }
 
+/** One human-readable line for a revision-delta entry. */
+function describeDeltaEntry(entry: PlanDeltaEntry): string {
+  const path = entry.path === undefined ? '' : `\`${entry.path}\``
+  switch (entry.kind) {
+    case 'commit-added':
+      return `commit ${entry.commitId} is new`
+    case 'file-added':
+      return `${path} was added to commit ${entry.commitId}`
+    case 'file-moved':
+      return `${path} moved from commit ${entry.fromCommitId} to commit ${entry.commitId}`
+    case 'file-excluded':
+      return `${path} is now excluded${entry.fromCommitId === undefined ? '' : ` (was in commit ${entry.fromCommitId})`}`
+    case 'message-changed':
+      return `the message of commit ${entry.commitId} was reworded`
+    default:
+      return entry.kind
+  }
+}
+
 /** Bound a document, marking the cut. */
 function bound(text: string): string {
   return text.length <= MAX_DETAIL_CHARS ? text : `${text.slice(0, MAX_DETAIL_CHARS)}\n\n… (truncated)`
@@ -41,11 +60,15 @@ function bound(text: string): string {
  * Render one plan revision as a review document.
  *
  * Deliberately deterministic: the same plan always produces the same text, so a
- * reviewer can compare revisions by eye.
+ * reviewer can compare revisions by eye. File-level rows come from the plan's
+ * frozen `reviewDetail` (paths and stats captured at publish time), never from
+ * re-reading the live worktree. Revisions stored before the detail existed
+ * fall back to change ids with an explicit note.
  */
 export function buildPlanReview(plan: PlanVersion): PlanReview {
   const lines: string[] = []
   const totalChanges = plan.commits.reduce((sum, commit) => sum + commit.changes.length, 0)
+  const detail = plan.reviewDetail
 
   lines.push(`## Plan revision ${plan.revision} — ${plan.commits.length} commit(s), ${totalChanges} change(s)`)
   lines.push('')
@@ -55,6 +78,9 @@ export function buildPlanReview(plan: PlanVersion): PlanReview {
   lines.push(`- **Index:** ${plan.indexStrategy === 'reuse-existing-index' ? 'reuses the staged content already in the index' : 'the index matches HEAD (all changes are unstaged/untracked)'}`)
   lines.push(`- **Plan id:** \`${plan.planId}\``)
   lines.push(`- **Content digest:** \`${plan.planDigest.slice(0, 16)}…\``)
+  if (detail === undefined) {
+    lines.push('- _File-level detail is unavailable for this revision (stored before review details existed)._')
+  }
   lines.push('')
 
   for (const commit of plan.commits) {
@@ -69,10 +95,26 @@ export function buildPlanReview(plan: PlanVersion): PlanReview {
       lines.push(`_Depends on:_ ${commit.dependsOn.join(', ')}`)
     }
     lines.push('')
-    const shown = commit.changes.slice(0, MAX_FILES_PER_COMMIT)
-    for (const changeId of shown) lines.push(`- \`${changeId}\``)
-    if (commit.changes.length > shown.length) {
-      lines.push(`- … and ${commit.changes.length - shown.length} more`)
+    const commitDetail = detail?.commits.find((d) => d.id === commit.id)
+    if (commitDetail !== undefined) {
+      const stat = commitDetail.stat
+      lines.push(`_Files: ${stat.files}, +${stat.additions}/-${stat.deletions}_`)
+      lines.push('')
+      const shown = commitDetail.changes.slice(0, MAX_FILES_PER_COMMIT)
+      for (const change of shown) {
+        const rename = change.oldPath === undefined ? '' : ` (from \`${change.oldPath}\`)`
+        const kind = change.binary ? ' [binary]' : change.symlink ? ' [symlink]' : ''
+        lines.push(`- \`${change.path}\` — ${change.status} [${change.layer}]${kind}${rename}`)
+      }
+      if (commitDetail.changes.length > shown.length) {
+        lines.push(`- … and ${commitDetail.changes.length - shown.length} more`)
+      }
+    } else {
+      const shown = commit.changes.slice(0, MAX_FILES_PER_COMMIT)
+      for (const changeId of shown) lines.push(`- \`${changeId}\``)
+      if (commit.changes.length > shown.length) {
+        lines.push(`- … and ${commit.changes.length - shown.length} more`)
+      }
     }
     if (commit.message.includes('\n')) {
       lines.push('')
@@ -88,6 +130,17 @@ export function buildPlanReview(plan: PlanVersion): PlanReview {
     lines.push('')
     for (const excluded of plan.excludedChanges) {
       lines.push(`- \`${excluded.path}\` — ${excluded.reason}`)
+    }
+    lines.push('')
+  }
+
+  if (plan.delta !== undefined && plan.delta.entries.length > 0) {
+    lines.push(`### Changes since revision ${plan.delta.fromRevision}`)
+    lines.push('')
+    const shown = plan.delta.entries.slice(0, MAX_FILES_PER_COMMIT)
+    for (const entry of shown) lines.push(`- ${describeDeltaEntry(entry)}`)
+    if (plan.delta.entries.length > shown.length) {
+      lines.push(`- … and ${plan.delta.entries.length - shown.length} more`)
     }
     lines.push('')
   }

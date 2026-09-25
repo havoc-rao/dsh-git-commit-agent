@@ -129,6 +129,93 @@ export interface PlannedCommit {
   readonly expectedTree: string
 }
 
+/** One file-level change frozen into a plan revision (human-readable review data). */
+export interface PlanChangeDetail {
+  readonly changeId: string
+  readonly path: string
+  readonly oldPath?: string
+  readonly layer: ChangeLayer
+  readonly status: ChangeStatus
+  readonly binary: boolean
+  readonly symlink: boolean
+}
+
+/** Authoritative diff stat between two trees (from `--numstat`, never truncated). */
+export interface DiffStat {
+  readonly files: number
+  readonly additions: number
+  readonly deletions: number
+}
+
+/**
+ * Frozen, human-readable detail of one planned commit.
+ *
+ * Unlike {@link PlannedCommit.changes} (change ids only), this resolves every
+ * change to its path/layer/status as captured in the snapshot the plan was
+ * built from, and pins the exact base→expected tree pair plus the full diff
+ * stat. It is display data, not executable content: the approval digest covers
+ * the plan's executable projection only.
+ */
+export interface PlanCommitDetail {
+  readonly id: string
+  readonly message: string
+  readonly rationale: string
+  readonly dependsOn: readonly string[]
+  readonly changes: readonly PlanChangeDetail[]
+  readonly baseTree: string
+  readonly expectedTree: string
+  readonly stat: DiffStat
+}
+
+/**
+ * Frozen review detail of a plan revision.
+ *
+ * Stored with every new {@link PlanVersion} so the transcript card, the tool
+ * text projection and the approval document can all render the same paths and
+ * stats without re-reading a snapshot that may no longer exist. Revisions
+ * stored before this field existed carry no detail; consumers fall back to
+ * change ids and must state that the detailed preview is unavailable.
+ */
+export interface PlanReviewDetail {
+  readonly schemaVersion: 1
+  readonly commits: readonly PlanCommitDetail[]
+}
+
+/** One entry of a revision-to-revision comparison (display data only). */
+export type PlanDeltaKind =
+  /** A commit id that did not exist in the previous revision. */
+  | 'commit-added'
+  /** A change that was not part of the previous revision. */
+  | 'file-added'
+  /** A change that moved from one commit to another. */
+  | 'file-moved'
+  /** A change that was planned before and is now explicitly excluded. */
+  | 'file-excluded'
+  /** The same commit id now carries a different message subject. */
+  | 'message-changed'
+
+/** One change between a previous plan revision and the current one. */
+export interface PlanDeltaEntry {
+  readonly kind: PlanDeltaKind
+  /** The current-revision commit involved (target commit for moves/adds). */
+  readonly commitId?: string
+  /** The previous-revision commit a moved change came from. */
+  readonly fromCommitId?: string
+  readonly changeId?: string
+  readonly path?: string
+}
+
+/**
+ * What changed since the previous revision of the same plan, computed by the
+ * host from the frozen review details of both revisions. Display data only —
+ * the approval digest covers only the executable projection, never this.
+ */
+export interface PlanRevisionDelta {
+  readonly schemaVersion: 1
+  readonly fromRevision: number
+  readonly entries: readonly PlanDeltaEntry[]
+}
+
 /** A change deliberately left out of the plan, with a reason. */
 export interface ExcludedChange {
   readonly changeId: string
@@ -222,6 +309,17 @@ export interface PlanVersion {
   readonly createdAt: string
   readonly approval: PlanApproval | null
   readonly execution: ExecutionRecord | null
+  /**
+   * Frozen human-readable review detail (paths, stats, trees per commit).
+   * Absent for revisions stored before this field existed.
+   */
+  readonly reviewDetail?: PlanReviewDetail
+  /**
+   * What changed since the previous revision of this plan (display data).
+   * Absent when this is the first revision or the previous one predates
+   * review details.
+   */
+  readonly delta?: PlanRevisionDelta
 }
 
 /** A task groups every plan version for one (source session, worktree). */

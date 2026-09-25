@@ -12,9 +12,11 @@ import { join, resolve } from 'node:path'
 import { GitCommitError, asGitCommitError } from './errors.js'
 import type {
   CommitTask,
+  DiffStat,
   ExecutionRecord,
   ExecutionResult,
   PlanApproval,
+  PlanCommitDetail,
   PlanVersion,
   PlannedCommit,
   Snapshot,
@@ -22,9 +24,10 @@ import type {
 import { GitRunner } from './git/runner.js'
 import { captureSnapshot, findChange, assertSafeRepoPath, repositoryIdentity } from './git/snapshot.js'
 import { computePlanDigest } from './plan/digest.js'
+import { computePlanDelta } from './plan/delta.js'
 import { assertPlanApprovable, executeApprovedPlan, reconcilePlan, type ExecutionEvent } from './plan/executor.js'
 import { WorktreeLock } from './plan/lock.js'
-import { materializePlan, treeDiff, type MaterializedStep } from './plan/materialize.js'
+import { materializePlan, treeDiff, treeNumstat, type MaterializedStep } from './plan/materialize.js'
 import { normalizeAndValidatePlan, type PlanDraft, type ValidationLimits } from './plan/validate.js'
 import { CommitAgentStore, type StoredTask } from './store/store.js'
 
@@ -87,6 +90,7 @@ export interface PlanPreviewBlock {
   }[]
   readonly baseTree: string
   readonly expectedTree: string
+  readonly stat: DiffStat
   readonly patch: string
   readonly patchTruncated: boolean
 }
@@ -276,7 +280,15 @@ export class CommitAgentService {
    */
   async diff(
     taskId: string,
-    options: { changeId?: string; planId?: string; revision?: number; maxBytes?: number; signal?: AbortSignal } = {},
+    options: {
+      changeId?: string
+      planId?: string
+      revision?: number
+      commitId?: string
+      path?: string
+      maxBytes?: number
+      signal?: AbortSignal
+    } = {},
   ): Promise<{ patch: string; truncated: boolean; description: string }> {
     const state = await this.getState(taskId, options)
     const runner = await this.runnerForTarget(state.task, options.signal)
@@ -290,6 +302,26 @@ export class CommitAgentService {
       if (plan === null) {
         throw new GitCommitError('PLAN_NOT_FOUND', `plan ${options.planId} was not found`, { taskId })
       }
+      if (options.commitId !== undefined && !plan.commits.some((c) => c.id === options.commitId)) {
+        throw new GitCommitError(
+          'BAD_ARGUMENT',
+          `commit ${options.commitId} is not part of plan ${plan.planId} revision ${plan.revision}`,
+          { planId: plan.planId, revision: plan.revision, commitId: options.commitId },
+        )
+      }
+      // A path filter must be a real plan path (it also rules out glob
+      // pathspecs, which `git diff --` would otherwise interpret).
+      if (options.path !== undefined) {
+        assertSafeRepoPath(options.path)
+        const plannedPaths = new Set(plan.commits.flatMap((c) => changesPaths(state.snapshot, c)))
+        if (!plannedPaths.has(options.path)) {
+          throw new GitCommitError(
+            'BAD_ARGUMENT',
+            `path ${options.path} is not part of plan ${plan.planId} revision ${plan.revision}`,
+            { planId: plan.planId, revision: plan.revision, path: options.path },
+          )
+        }
+      }
       const materialized = await materializePlan({
         runner,
         snapshot: state.snapshot,
@@ -297,22 +329,37 @@ export class CommitAgentService {
         indexStrategy: plan.indexStrategy,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       })
-      const rendered = await Promise.all(
-        materialized.steps.map(async (step) => {
-          const planned = plan.commits.find((c) => c.id === step.commitId)
-          const paths = planned === undefined ? [] : changesPaths(state.snapshot, planned)
-          const diff = await treeDiff(runner, step.baseTree, step.expectedTree, {
-            maxBytes,
-            paths,
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-          })
-          return `### ${step.commitId}: ${(planned?.message ?? '').split('\n')[0] ?? ''}\n\n${diff.patch}`
-        }),
-      )
+      const rendered = (
+        await Promise.all(
+          materialized.steps.map(async (step): Promise<string | null> => {
+            if (options.commitId !== undefined && step.commitId !== options.commitId) return null
+            const planned = plan.commits.find((c) => c.id === step.commitId)
+            let paths = planned === undefined ? [] : changesPaths(state.snapshot, planned)
+            if (options.path !== undefined) paths = paths.filter((p) => p === options.path)
+            const diff = await treeDiff(runner, step.baseTree, step.expectedTree, {
+              maxBytes,
+              paths,
+              ...(options.signal === undefined ? {} : { signal: options.signal }),
+            })
+            return `### ${step.commitId}: ${(planned?.message ?? '').split('\n')[0] ?? ''}\n\n${diff.patch}`
+          }),
+        )
+      ).filter((section): section is string => section !== null)
+      if (rendered.length === 0) {
+        throw new GitCommitError('BAD_ARGUMENT', `commit ${options.commitId} was not materialised`, {
+          planId: plan.planId,
+          revision: plan.revision,
+          commitId: options.commitId,
+        })
+      }
+      const scopeNote = [
+        options.commitId === undefined ? '' : ` commit ${options.commitId}`,
+        options.path === undefined ? '' : ` path ${options.path}`,
+      ].join('')
       return {
         patch: rendered.join('\n'),
         truncated: rendered.some((r) => r.includes('...')),
-        description: `proposed diff for plan ${plan.planId} revision ${plan.revision}`,
+        description: `proposed diff for plan ${plan.planId} revision ${plan.revision}${scopeNote}`,
       }
     }
 
@@ -435,6 +482,89 @@ export class CommitAgentService {
     const revision = stored.task.latestRevision + 1
     const planId = stored.plans[0]?.planId ?? this.newId()
 
+    // Preview and frozen review detail are derived from the materialised trees
+    // and the snapshot only — both are available before the plan is stored.
+    const preview: PlanPreviewBlock[] = []
+    const reviewCommits: PlanCommitDetail[] = []
+    const previewMaxBytes = options.previewMaxBytes ?? 64 * 1024
+    for (const step of materialized.steps) {
+      const planned = commits.find((c) => c.id === step.commitId)
+      const paths = planned === undefined ? [] : changesPaths(state.snapshot, planned)
+      const diff = await treeDiff(runner, step.baseTree, step.expectedTree, {
+        maxBytes: previewMaxBytes,
+        paths,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      })
+      // Counts come from `--numstat`, which is line-based and never truncated:
+      // a capped patch must not be presented as the full change.
+      const stat = await treeNumstat(runner, step.baseTree, step.expectedTree, {
+        paths,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      })
+      const changeDetails = (planned?.changes ?? []).flatMap((changeId) => {
+        const record = findChange(state.snapshot, changeId)
+        return record === undefined
+          ? []
+          : [{
+              changeId: record.changeId,
+              path: record.path,
+              layer: record.layer,
+              status: record.status,
+              binary: record.binary,
+              symlink: record.symlink,
+              ...(record.oldPath === undefined ? {} : { oldPath: record.oldPath }),
+            }]
+      })
+      preview.push({
+        commitId: step.commitId,
+        message: planned?.message ?? '',
+        rationale: planned?.rationale ?? '',
+        dependsOn: planned?.dependsOn ?? [],
+        changes: changeDetails.map(({ changeId, path, layer, status, oldPath }) => ({
+          changeId,
+          path,
+          layer,
+          status,
+          ...(oldPath === undefined ? {} : { oldPath }),
+        })),
+        baseTree: step.baseTree,
+        expectedTree: step.expectedTree,
+        stat,
+        patch: diff.patch,
+        patchTruncated: diff.truncated,
+      })
+      reviewCommits.push({
+        id: step.commitId,
+        message: planned?.message ?? '',
+        rationale: planned?.rationale ?? '',
+        dependsOn: planned?.dependsOn ?? [],
+        changes: changeDetails,
+        baseTree: step.baseTree,
+        expectedTree: step.expectedTree,
+        stat,
+      })
+    }
+
+    // What changed since the previous revision of this plan (display data).
+    const reviewPathOf = new Map<string, string>()
+    for (const rc of reviewCommits) {
+      for (const change of rc.changes) reviewPathOf.set(change.changeId, change.path)
+    }
+    const prior = stored.plans
+      .filter((p) => p.planId === planId && p.revision < revision && p.reviewDetail !== undefined)
+      .sort((a, b) => b.revision - a.revision)[0]
+    const delta = computePlanDelta(
+      prior === undefined
+        ? null
+        : { revision: prior.revision, commits: prior.commits, excludedChanges: prior.excludedChanges },
+      {
+        commits,
+        excludedChanges: outcome.normalized.excluded,
+        pathOf: (changeId: string): string | undefined =>
+          reviewPathOf.get(changeId) ?? findChange(state.snapshot, changeId)?.path,
+      },
+    )
+
     const provisional: PlanVersion = {
       schemaVersion: 1,
       planId,
@@ -459,45 +589,14 @@ export class CommitAgentService {
       createdAt: this.now().toISOString(),
       approval: null,
       execution: null,
+      // Blocked plans have no materialised trees, so no detail to freeze.
+      ...(blockers.length === 0 ? { reviewDetail: { schemaVersion: 1 as const, commits: reviewCommits } } : {}),
+      ...(delta === null ? {} : { delta }),
     }
     const plan: PlanVersion = { ...provisional, planDigest: computePlanDigest(provisional) }
     await this.store.appendPlan(taskId, plan)
     await this.store.markPlansStale(taskId, planId)
     await this.store.revokeOtherRevisions(taskId, revision)
-
-    const preview: PlanPreviewBlock[] = []
-    const previewMaxBytes = options.previewMaxBytes ?? 64 * 1024
-    for (const step of materialized.steps) {
-      const planned = commits.find((c) => c.id === step.commitId)
-      const paths = planned === undefined ? [] : changesPaths(state.snapshot, planned)
-      const diff = await treeDiff(runner, step.baseTree, step.expectedTree, {
-        maxBytes: previewMaxBytes,
-        paths,
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-      })
-      preview.push({
-        commitId: step.commitId,
-        message: planned?.message ?? '',
-        rationale: planned?.rationale ?? '',
-        dependsOn: planned?.dependsOn ?? [],
-        changes: (planned?.changes ?? []).flatMap((changeId) => {
-          const record = findChange(state.snapshot, changeId)
-          return record === undefined
-            ? []
-            : [{
-                changeId: record.changeId,
-                path: record.path,
-                layer: record.layer,
-                status: record.status,
-                ...(record.oldPath === undefined ? {} : { oldPath: record.oldPath }),
-              }]
-        }),
-        baseTree: step.baseTree,
-        expectedTree: step.expectedTree,
-        patch: diff.patch,
-        patchTruncated: diff.truncated,
-      })
-    }
 
     return { task: state.task, plan, preview, snapshot: state.snapshot }
   }
