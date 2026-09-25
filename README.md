@@ -66,7 +66,7 @@ calling the dedicated-session API on a host without one fails with a clear
 | Tool | Purpose |
 | --- | --- |
 | `commit_agent_inspect` | the single state tool, `mode=status` (default: HEAD, branch, index state, index rule, in-progress operations, every pending change with a content-addressed `changeId`, existing plan revisions) / `mode=recent` (subjects for style) / `mode=reconcile` (match one plan revision against real history after a crash or failed execution) |
-| `commit_agent_diff` | the single diff reader: the full working-tree diff, one change's diff, or the exact per-commit diff a planned revision would introduce |
+| `commit_agent_diff` | the single diff reader: the full working-tree diff, one change's diff, or the exact per-commit diff a planned revision would introduce — filterable to one commit (`commitId`) and one file (`path`), so a large file can be read in full while the whole-plan preview stays capped |
 | `commit_agent_read_files` | the single file reader: bounded contents of specific repository paths; secrets and binaries excluded with a reason |
 | `commit_agent_prepare_plan` | prepare a new immutable plan revision; the host validates, computes every expected tree, returns the preview |
 | `commit_agent_apply_plan` | submit one revision to the human's plan-review panel and, once approved, execute it; the host verifies approval, digest, snapshot and staged tree |
@@ -80,7 +80,10 @@ The model can propose, preview and explain — it can never approve. Approval go
 through the host's own question surface using the `plan-review` intent
 (`ctx.userQuestions.ask({ ... intent: { kind: 'plan-review', approve: 'Approve' } })`),
 so the user sees the plan document the content digest covers and answers through
-a host-owned protocol. `commit_agent_apply_plan` submits one exact
+a host-owned protocol. The document lists per commit the frozen file paths
+(status + layer), the `--numstat` counts and the base→expected trees; revisions
+stored before review details existed fall back to change ids with an explicit
+note. `commit_agent_apply_plan` submits one exact
 revision; a decline is a normal outcome (the user's free-text feedback reaches
 the model), and a newer revision revokes an older approval. Only after the
 decision does the host execute — the same call returns the execution result.
@@ -154,10 +157,21 @@ Either way the flow is the same:
 1. the agent calls `commit_agent_inspect` (mode=status), reads the real diffs
    (`commit_agent_diff`) and file contents (`commit_agent_read_files`), and
    prepares a plan (`commit_agent_prepare_plan`);
-2. the plan appears as a transcript card, and each commit can be opened as a
-   proposed diff in the sidebar's DiffPane;
+2. the plan appears as a transcript card: a summary (revision, commit count,
+   file count, per-commit `+/-`), expandable per-commit file lists with
+   status/layer/rename, exclusions and warnings, a **revision delta** ("what
+   changed since rev N": files moved between commits, reworded messages, new
+   exclusions), and a collapsed technical section (plan id, digest, trees).
+   Each commit opens as a **versioned** proposed diff in the sidebar's
+   DiffPane (the tab id carries the revision, so two revisions never share one
+   tab; the seed carries `truncated` and a `sourceRef` snapshot label the
+   sidebar shows as display-only metadata; file rows jump to the live file in
+   the sidebar editor, **diff rows open it at the line** — the patch itself
+   stays a read-only snapshot; stats and file lists always come from the
+   untruncated `--numstat`);
 3. the agent calls `commit_agent_apply_plan` and you decide in the host's
-   plan-review panel;
+   plan-review panel — its document lists paths, stat and trees from the
+   plan's frozen review detail, never live worktree reads;
 4. only after your approval does the host execute — the same call then returns
    the execution result (commits landed, or why it stopped).
 
