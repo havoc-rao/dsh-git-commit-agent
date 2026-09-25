@@ -276,7 +276,7 @@ test('apply registers the GitLens action with the delivered contract shape', asy
   assert.equal(available(null), false)
 })
 
-test('the button is disabled without staged changes and enabled with them', async () => {
+test('the button is usable with any working-tree change, staged or not', async () => {
   const { exports } = await loadBundle()
   const harness = fakeCtx()
   await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
@@ -284,13 +284,25 @@ test('the button is disabled without staged changes and enabled with them', asyn
   assert.ok(action)
   const component = action['component'] as (props: Record<string, unknown>) => unknown
 
-  const empty = component({ status: { isRepo: true }, staged: [], scope: { sessionId: 's' }, worktree: '/repo' })
-  const emptyButton = findByType(empty, 'button')
-  assert.equal(emptyButton?.props['disabled'], true)
+  const clean = component({ status: { isRepo: true, entries: [] }, staged: [], scope: { sessionId: 's' }, worktree: '/repo' })
+  const cleanButton = findByType(clean, 'button')
+  assert.equal(cleanButton?.props['disabled'], true)
 
-  const ready = component({ status: { isRepo: true }, staged: [{ path: 'a' }], scope: { sessionId: 's' }, worktree: '/repo' })
-  const readyButton = findByType(ready, 'button')
-  assert.equal(readyButton?.props['disabled'], false)
+  // An empty index with unstaged changes must enable the flow: the plan
+  // stages the files itself before committing.
+  const unstaged = component({ status: { isRepo: true, entries: [{ path: 'a', xy: ' M' }] }, staged: [], scope: { sessionId: 's' }, worktree: '/repo' })
+  const unstagedButton = findByType(unstaged, 'button')
+  assert.equal(unstagedButton?.props['disabled'], false)
+
+  // Untracked files alone enable it too.
+  const untracked = component({ status: { isRepo: true, entries: [{ path: 'b', xy: '??' }] }, staged: [], scope: { sessionId: 's' }, worktree: '/repo' })
+  const untrackedButton = findByType(untracked, 'button')
+  assert.equal(untrackedButton?.props['disabled'], false)
+
+  // Staged content keeps working as before.
+  const staged = component({ status: { isRepo: true, entries: [{ path: 'a', xy: 'M ' }] }, staged: [{ path: 'a' }], scope: { sessionId: 's' }, worktree: '/repo' })
+  const stagedButton = findByType(staged, 'button')
+  assert.equal(stagedButton?.props['disabled'], false)
 })
 
 test('clicking the button creates a session in the worktree, seeds the prompt and submits', async () => {
@@ -316,8 +328,36 @@ test('clicking the button creates a session in the worktree, seeds the prompt an
   assert.deepEqual(harness.opened, [createInput['sessionId']])
   assert.equal(harness.drafts.length, 1)
   assert.ok(harness.drafts[0]?.includes('/repo-wt'))
-  assert.ok(harness.drafts[0]?.includes('commit_agent_request_approval'))
+  assert.ok(harness.drafts[0]?.includes('commit_agent_apply_plan'))
   assert.ok(harness.drafts[0]?.includes('不要自己声称我已批准'))
+  assert.equal(harness.submits, 1)
+})
+
+test('clicking with an empty index runs the same flow and tells the agent to stage first', async () => {
+  const { exports } = await loadBundle()
+  const harness = fakeCtx()
+  await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
+  const component = (harness.actions[0] as Record<string, unknown>)['component'] as (props: Record<string, unknown>) => unknown
+
+  const tree = component({
+    status: { isRepo: true, entries: [{ path: 'a', xy: ' M' }, { path: 'b', xy: '??' }] },
+    staged: [],
+    scope: { sessionId: 'session-source' },
+    repoRoot: '/repo',
+    worktree: '/repo-wt',
+    branch: 'feat/x',
+  })
+  const button = findByType(tree, 'button')
+  assert.ok(button)
+  assert.equal(button.props['disabled'], false)
+  ;(button.props['onClick'] as () => void)()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  const createInput = assertCommitSession(harness, { cwd: '/repo-wt' })
+  assert.deepEqual(harness.opened, [createInput['sessionId']])
+  assert.equal(harness.drafts.length, 1)
+  assert.ok(harness.drafts[0]?.includes('commit_agent_inspect'))
+  assert.ok(harness.drafts[0]?.includes('没有已暂存内容'))
   assert.equal(harness.submits, 1)
 })
 
@@ -409,7 +449,7 @@ test('a missing sidebar degrades to tools-only without throwing', async () => {
   assert.equal(harness.actions.length, 0)
   assert.equal(harness.logged.length, 1)
   // The transcript cards are still registered.
-  assert.deepEqual(harness.toolviews.map((t) => t.key).sort(), ['commit_agent_publish_plan', 'commit_agent_request_approval'].sort())
+  assert.deepEqual(harness.toolviews.map((t) => t.key).sort(), ['commit_agent_prepare_plan', 'commit_agent_apply_plan'].sort())
 })
 
 test('an older sidebar without the feature flag is not used', async () => {
@@ -423,7 +463,7 @@ test('the plan card renders the plan and opens a proposed diff', async () => {
   const { exports } = await loadBundle()
   const harness = fakeCtx()
   await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
-  const card = harness.toolviews.find((t) => t.key === 'commit_agent_publish_plan')
+  const card = harness.toolviews.find((t) => t.key === 'commit_agent_prepare_plan')
   assert.ok(card)
 
   const meta = {
@@ -462,7 +502,7 @@ test('the plan card shows blockers and tolerates a running (meta-less) call', as
   const { exports } = await loadBundle()
   const harness = fakeCtx()
   await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
-  const card = harness.toolviews.find((t) => t.key === 'commit_agent_publish_plan')
+  const card = harness.toolviews.find((t) => t.key === 'commit_agent_prepare_plan')
   assert.ok(card)
 
   const pending = JSON.stringify(card.component({ block: {} }))
@@ -482,12 +522,17 @@ test('the plan card shows blockers and tolerates a running (meta-less) call', as
   assert.ok(JSON.stringify(blocked).includes('UNCOVERED_CHANGE'))
 })
 
-test('the approval card reflects the decision', async () => {
+test('the apply card reflects the decision and the execution', async () => {
   const { exports } = await loadBundle()
   const harness = fakeCtx()
   await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
-  const card = harness.toolviews.find((t) => t.key === 'commit_agent_request_approval')
+  const card = harness.toolviews.find((t) => t.key === 'commit_agent_apply_plan')
   assert.ok(card)
-  assert.ok(JSON.stringify(card.component({ block: { meta: { approved: true, planId: 'p', revision: 1 } } })).includes('已获批准'))
+  const executed = JSON.stringify(card.component({
+    block: { meta: { approved: true, planId: 'p', revision: 1, outcome: 'completed', commits: [{ oid: 'abc1' }] } },
+  }))
+  assert.ok(executed.includes('已获批准'))
+  assert.ok(executed.includes('execution completed'))
+  assert.ok(executed.includes('1 个提交'))
   assert.ok(JSON.stringify(card.component({ block: { meta: { approved: false, planId: 'p', revision: 1 } } })).includes('未获批准'))
 })

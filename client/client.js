@@ -32,8 +32,9 @@ window.__ModuleLoader__.load({
 
     const ACTION_ID = 'dsh-git-commit-agent:plan-and-commit'
     const DIFF_ID_PREFIX = 'git-commit-agent:plan'
-    const PUBLISH_TOOL = 'commit_agent_publish_plan'
-    const APPROVAL_TOOL = 'commit_agent_request_approval'
+    /** The transcript card keys: prepare_plan renders the plan, apply_plan the decision + execution. */
+    const PREPARE_TOOL = 'commit_agent_prepare_plan'
+    const APPLY_TOOL = 'commit_agent_apply_plan'
     const STYLE_ID = 'dsh-git-commit-agent/client.css'
     /**
      * Reserved session-id prefix the host half matches on.
@@ -83,19 +84,26 @@ window.__ModuleLoader__.load({
     }
 
     /** The prompt the button seeds into the new session. */
-    function buildPlanningPrompt(worktree, branch) {
-      return [
+    function buildPlanningPrompt(worktree, branch, stagedCount) {
+      const lines = [
         '请为这个 worktree 规划提交。',
         'worktree: ' + worktree,
         'branch: ' + (branch || '(detached)'),
         '',
         '要求：',
         '1. 先调用 commit_agent_inspect（默认 mode=status）读取真实状态与 changeId。changeId 是内容寻址的，文件一变就失效，必须重新读取；若状态显示已有暂存内容，所有 staged 变更必须进入第一个提交。',
-        '2. 用 commit_agent_inspect mode=diff / mode=files 看真实改动，不要从路径或扩展名猜内容。',
-        '3. 用 commit_agent_publish_plan 发布计划：每个待提交变更必须恰好出现一次；未纳入的必须放进 excludedChanges 并给出理由。',
-        '4. 计划没有 blocker 后调用 commit_agent_request_approval 让我审批。',
-        '5. 只有我批准之后才能调用 commit_agent_execute_plan。不要自己声称我已批准。',
-      ].join('\n')
+        '2. 用 commit_agent_diff / commit_agent_read_files 看真实改动，不要从路径或扩展名猜内容。',
+        '3. 用 commit_agent_prepare_plan 准备计划：每个待提交变更必须恰好出现一次；未纳入的必须放进 excludedChanges 并给出理由。',
+        '4. 计划没有 blocker 后调用 commit_agent_apply_plan：宿主会弹出审批面板让我批准；我批准之后才会真正执行提交。',
+        '5. 不要自己声称我已批准。若我拒绝，先问我怎么改，再准备新版本重新提交。',
+      ]
+      if (stagedCount === 0) {
+        lines.push(
+          '',
+          '当前没有已暂存内容：工作区改动与未跟踪文件都要纳入提交计划，执行时由计划自行暂存后再提交，不要要求我先手动 git add。',
+        )
+      }
+      return lines.join('\n')
     }
 
     /** Resolve a host service, tolerating an absent one. */
@@ -205,7 +213,8 @@ window.__ModuleLoader__.load({
       const actx = typeof sessions.scope === 'function' ? sessions.scope(sessionId) : undefined
       if (conversation && conversation.input && actx !== undefined) {
         const input = conversation.input.for(actx)
-        input.setDraft(buildPlanningPrompt(worktree, target.branch))
+        const stagedCount = Array.isArray(target.staged) ? target.staged.length : 0
+        input.setDraft(buildPlanningPrompt(worktree, target.branch, stagedCount))
         if (typeof input.submit === 'function') input.submit()
       }
       return sessionId
@@ -230,9 +239,18 @@ window.__ModuleLoader__.load({
     function CommitAction(props) {
       const [busy, setBusy] = React.useState(false)
       const [error, setError] = React.useState(null)
+      const status = props.status && typeof props.status === 'object' ? props.status : {}
+      const entries = Array.isArray(status.entries) ? status.entries : null
       const staged = Array.isArray(props.staged) ? props.staged : []
-      const isRepo = Boolean(props.status && props.status.isRepo)
-      const disabled = busy || !isRepo || staged.length === 0
+      const isRepo = Boolean(status.isRepo)
+      // Any working-tree change enables the flow — with an empty index the
+      // plan itself stages the files before committing (the executor
+      // materializes each commit group from the plan's change records), so the
+      // entry must not require pre-staged content. `entries` is the host's
+      // full status snapshot (staged + unstaged + untracked); hosts without it
+      // fall back to the explicit staged list.
+      const hasChanges = entries !== null ? entries.length > 0 : staged.length > 0
+      const disabled = busy || !isRepo || !hasChanges
       const onClick = function () {
         setBusy(true)
         setError(null)
@@ -248,9 +266,11 @@ window.__ModuleLoader__.load({
         ? '正在打开规划会话…'
         : !isRepo
           ? '当前不是 git 仓库'
-          : staged.length === 0
-            ? '没有已暂存的变更'
-            : '在新会话中规划并提交这些变更'
+          : !hasChanges
+            ? '没有待提交的变更'
+            : staged.length === 0
+              ? '规划并提交这些变更（未暂存的变更将纳入计划）'
+              : '在新会话中规划并提交这些变更'
       return h(
         'div',
         { className: 'dsh-gca-action' },
@@ -365,23 +385,35 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'dsh-gca-card' }, children)
     }
 
-    /** A compact card for the approval tool result. */
-    function ApprovalCard(props) {
+    /** A compact card for the apply_plan result (approval decision + execution). */
+    function ApplyCard(props) {
       const block = props.block
       const meta = block && block.meta
       if (!meta || typeof meta !== 'object') {
         return h('div', { className: 'dsh-gca-card' }, '等待审批结果…')
       }
-      return h(
-        'div',
-        { className: 'dsh-gca-card' },
-        h('h4', null, meta.approved === true ? '计划已获批准' : '计划未获批准'),
+      const approved = meta.approved === true
+      const children = [
+        h('h4', { key: 'title' }, approved ? '计划已获批准' : '计划未获批准'),
         h(
           'div',
-          { className: 'dsh-gca-meta' },
+          { key: 'meta', className: 'dsh-gca-meta' },
           'plan ' + String(meta.planId) + ' revision ' + String(meta.revision),
         ),
-      )
+      ]
+      if (approved) {
+        const commits = Array.isArray(meta.commits) ? meta.commits : []
+        const failure = meta.failure && typeof meta.failure === 'object' ? meta.failure : null
+        children.push(
+          h(
+            'div',
+            { key: 'outcome', className: 'dsh-gca-meta' },
+            'execution ' + String(meta.outcome || '') + ' · ' + commits.length + ' 个提交'
+              + (failure !== null ? ' · 失败于 ' + String(failure.stage || '') : ''),
+          ),
+        )
+      }
+      return h('div', { className: 'dsh-gca-card' }, children)
     }
 
     /**
@@ -419,7 +451,7 @@ window.__ModuleLoader__.load({
 
       if (ctx.slots && typeof ctx.slots.inject === 'function') {
         ctx.slots.inject('tool.call.toolview', function* () {
-          yield ctx.slots.register({ name: 'tool.call.toolview', key: PUBLISH_TOOL }, function (props) {
+          yield ctx.slots.register({ name: 'tool.call.toolview', key: PREPARE_TOOL }, function (props) {
             return h(PlanCard, {
               block: props.block,
               openDiff: function (entry) {
@@ -427,8 +459,8 @@ window.__ModuleLoader__.load({
               },
             })
           })
-          yield ctx.slots.register({ name: 'tool.call.toolview', key: APPROVAL_TOOL }, function (props) {
-            return h(ApprovalCard, { block: props.block })
+          yield ctx.slots.register({ name: 'tool.call.toolview', key: APPLY_TOOL }, function (props) {
+            return h(ApplyCard, { block: props.block })
           })
         })
       }
@@ -441,7 +473,7 @@ window.__ModuleLoader__.load({
       openPlanDiff: openPlanDiff,
       CommitAction: CommitAction,
       PlanCard: PlanCard,
-      ApprovalCard: ApprovalCard,
+      ApplyCard: ApplyCard,
       planMetaOf: planMetaOf,
     }
 
