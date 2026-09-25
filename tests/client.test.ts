@@ -167,8 +167,8 @@ function fakeCtx(options: {
       actions.push(descriptor)
       return () => undefined
     },
-    openTab(seed: Record<string, unknown>) {
-      tabs.push(seed)
+    openTab(seed: Record<string, unknown>, scope?: Record<string, unknown>) {
+      tabs.push({ ...seed, ...(scope === undefined ? {} : { scope }) })
     },
   }
 
@@ -459,7 +459,7 @@ test('an older sidebar without the feature flag is not used', async () => {
   assert.equal(harness.actions.length, 0)
 })
 
-test('the plan card renders the plan and opens a proposed diff', async () => {
+test('the plan card renders summary, details, exclusions and a versioned proposed diff', async () => {
   const { exports } = await loadBundle()
   const harness = fakeCtx()
   await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
@@ -470,19 +470,72 @@ test('the plan card renders the plan and opens a proposed diff', async () => {
     planId: 'plan-1',
     revision: 2,
     planDigest: 'abcdef0123456789',
-    blockers: [],
+    indexStrategy: 'index-empty-whole-file',
+    previewTruncated: true,
     preview: [
-      { commitId: 'c1', message: 'feat: add a\n\nbody', patch: 'diff --git a/a b/a\n' },
-      { commitId: 'c2', message: 'test: cover a', patch: 'diff --git a/b b/b\n' },
+      {
+        commitId: 'c1',
+        message: 'feat: add a\n\nbody',
+        rationale: 'groups the new file with its test',
+        patch: 'diff --git a/a b/a\n',
+        patchTruncated: true,
+        baseTree: '0000',
+        expectedTree: '1111',
+        stat: { files: 2, additions: 82, deletions: 16 },
+        changes: [
+          { changeId: 'x1', path: 'src/a.ts', layer: 'worktree', status: 'modified' },
+          { changeId: 'x2', oldPath: 'old/a.ts', path: 'src/a.ts', layer: 'worktree', status: 'renamed', binary: true },
+        ],
+        dependsOn: [],
+      },
+      {
+        commitId: 'c2',
+        message: 'test: cover a',
+        patch: 'diff --git a/b b/b\n',
+        stat: { files: 1, additions: 3, deletions: 0 },
+        changes: [{ changeId: 'x3', path: 'src/a.test.ts', layer: 'untracked', status: 'added' }],
+        dependsOn: ['c1'],
+      },
+    ],
+    excludedChanges: [{ changeId: 'x4', path: 'tmp.log', reason: 'not part of this change' }],
+    warnings: ['a warning'],
+    delta: {
+      fromRevision: 1,
+      entries: [
+        { kind: 'message-changed', commitId: 'c1' },
+        { kind: 'file-moved', commitId: 'c2', fromCommitId: 'c1', changeId: 'x2', path: 'src/a.ts' },
+        { kind: 'file-excluded', fromCommitId: 'c1', changeId: 'x4', path: 'tmp.log' },
+      ],
+    },
+    commits: [
+      { id: 'c1', message: 'feat: add a' },
+      { id: 'c2', message: 'test: cover a' },
     ],
   }
-  const tree = card.component({ block: { meta } })
+  const tree = card.component({ block: { meta }, sessionId: 'session-git-commit-t' })
   const text = JSON.stringify(tree)
+  // Header: revision, commit count and the host-computed file count.
   assert.ok(text.includes('revision 2'))
+  assert.ok(text.includes('2 个提交'))
+  assert.ok(text.includes('3 个文件'))
+  // Per-commit summary lines carry subject and untruncated statistics.
   assert.ok(text.includes('feat: add a'))
   assert.ok(text.includes('test: cover a'))
+  assert.ok(text.includes('2 文件 · +82/-16'))
+  // Warnings and exclusions are visible.
+  assert.ok(text.includes('暂不提交 1 项'))
+  assert.ok(text.includes('tmp.log'))
+  assert.ok(text.includes('a warning'))
+  // The revision delta answers "what changed since I last declined". Target
+  // commits render as their position (2), source commits by id (c1) — the
+  // previous revision's numbering is not carried.
+  assert.ok(text.includes('相对上一版（rev 1）3 项'))
+  assert.ok(text.includes('提交 1 的消息已更新'))
+  assert.ok(text.includes('src/a.ts 从提交 c1 移入提交 2'))
+  assert.ok(text.includes('tmp.log 变为暂不提交（原在提交 c1）'))
 
-  // The card's diff button opens a proposed diff through the sidebar.
+  // The card's diff button opens a proposed diff whose identity is scoped to
+  // the plan revision, so two revisions never share one tab.
   let diffButton: Element | null = null
   walk(tree, (element) => {
     if (element.type === 'button' && element.props['children'] === '查看差异' && diffButton === null) diffButton = element
@@ -492,10 +545,17 @@ test('the plan card renders the plan and opens a proposed diff', async () => {
   assert.equal(harness.tabs.length, 1)
   const seed = harness.tabs[0] as Record<string, unknown>
   assert.equal(seed['type'], 'diff')
-  assert.equal(seed['id'], 'git-commit-agent:plan:plan-1:c1')
+  assert.equal(seed['id'], 'git-commit-agent:plan:plan-1:2:c1')
+  assert.equal(seed['title'], '计划 v2 · c1 · feat: add a')
+  // Explicit scope: the open lands in the initiating session's sidebar state.
+  assert.deepEqual(seed['scope'], { sessionId: 'session-git-commit-t' })
   const diff = seed['diff'] as Record<string, unknown>
   assert.equal(diff['kind'], 'proposed')
   assert.ok(String(diff['patch']).includes('diff --git'))
+  // Integrity metadata for the sidebar: the caller-declared truncation flag
+  // and a snapshot label identifying the exact plan revision.
+  assert.equal(diff['truncated'], true)
+  assert.equal(diff['sourceRef'], 'plan plan-1 rev 2')
 })
 
 test('the plan card shows blockers and tolerates a running (meta-less) call', async () => {

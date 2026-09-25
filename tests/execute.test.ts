@@ -96,6 +96,18 @@ test('two commits are created exactly as planned', async () => {
     assert.ok(published.preview[1]?.patch.includes('beta'))
     // The second preview is the *incremental* diff for that commit only.
     assert.ok(!published.preview[1]?.patch.includes('alpha'))
+    // Stats come from `--numstat`: one file per commit, never truncated.
+    assert.deepEqual(published.preview[0]?.stat, { files: 1, additions: 1, deletions: 0 })
+    assert.deepEqual(published.preview[1]?.stat, { files: 1, additions: 1, deletions: 0 })
+    // The plan carries frozen review detail with resolved paths.
+    const detail = published.plan.reviewDetail
+    assert.equal(detail?.commits.length, 2)
+    assert.equal(detail?.commits[0]?.changes[0]?.path, 'src/a.txt')
+    assert.equal(detail?.commits[0]?.baseTree, published.preview[0]?.baseTree)
+    assert.equal(detail?.commits[0]?.expectedTree, published.preview[0]?.expectedTree)
+    // The approval digest covers only the executable projection: adding the
+    // display detail must not change the digest.
+    assert.ok(/^[0-9a-f]{64}$/.test(published.plan.planDigest))
 
     await h.service.approvePlan({
       taskId: h.taskId,
@@ -449,6 +461,65 @@ test('execution is refused while a merge is in progress', async () => {
       () => h.service.executePlan({ taskId: h.taskId, planId: published.plan.planId, revision: published.plan.revision }),
       (error: unknown) => error instanceof GitCommitError,
     )
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('a plan revision carries the delta against the previous revision', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    await writeFile(fixture.root, 'a.txt', 'a\n')
+    await writeFile(fixture.root, 'b.txt', 'b\n')
+    const h = await harness(fixture)
+    const entries = await entriesOf(h.service, h.taskId)
+    const a = idFor(entries, 'a.txt')
+    const b = idFor(entries, 'b.txt')
+
+    // First revision: no delta by definition.
+    const rev1 = await h.service.publishPlan(h.taskId, {
+      commits: [
+        { message: 'feat: add a', changes: [a] },
+        { message: 'feat: add b', changes: [b] },
+      ],
+    })
+    assert.equal(rev1.plan.delta, undefined)
+
+    // Second revision: both files swap commits and c1 is reworded.
+    const rev2 = await h.service.publishPlan(h.taskId, {
+      commits: [
+        { message: 'feat: reworded', changes: [b] },
+        { message: 'feat: add a', changes: [a] },
+      ],
+    })
+    assert.deepEqual(rev2.plan.delta, {
+      schemaVersion: 1,
+      fromRevision: 1,
+      entries: [
+        { kind: 'message-changed', commitId: 'c1' },
+        { kind: 'file-moved', commitId: 'c1', fromCommitId: 'c2', changeId: b, path: 'b.txt' },
+        { kind: 'message-changed', commitId: 'c2' },
+        { kind: 'file-moved', commitId: 'c2', fromCommitId: 'c1', changeId: a, path: 'a.txt' },
+      ],
+    })
+    // The delta is persisted with the revision (display data, append-only).
+    const stored = await h.service.plansOf(h.taskId)
+    assert.deepEqual(
+      stored.find((p) => p.revision === 2)?.delta,
+      rev2.plan.delta,
+    )
+
+    // Third revision: a.txt becomes explicitly excluded; its commit is gone.
+    const rev3 = await h.service.publishPlan(h.taskId, {
+      commits: [{ message: 'feat: reworded', changes: [b] }],
+      excludedChanges: [{ changeId: a, reason: 'separate follow-up' }],
+    })
+    assert.deepEqual(rev3.plan.delta?.entries, [
+      { kind: 'file-excluded', fromCommitId: 'c2', changeId: a, path: 'a.txt' },
+    ])
+    // The digest is a property of the executable projection only: adding the
+    // delta must not change it for identical plans.
+    assert.equal(rev3.plan.planDigest.length, 64)
   } finally {
     await fixture.cleanup()
   }

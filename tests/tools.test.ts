@@ -70,9 +70,22 @@ test('no tool exposes a general-purpose escape hatch', () => {
   const tools = buildCommitAgentTools({ service: new CommitAgentService({ dataDir: '/tmp/unused' }), resolveWorkspace: async () => null })
   for (const tool of tools) {
     const properties = (tool.parameters as { properties?: Record<string, unknown> }).properties ?? {}
-    for (const forbidden of ['command', 'args', 'argv', 'cwd', 'shell', 'path', 'content', 'patch', 'url']) {
+    for (const forbidden of ['command', 'args', 'argv', 'cwd', 'shell', 'content', 'patch', 'url']) {
       assert.equal(forbidden in properties, false, `${tool.name} must not accept "${forbidden}"`)
     }
+  }
+  // `path` is allowed ONLY on commit_agent_diff, where it is not a filesystem
+  // path but a filter pathspec validated against the plan (assertSafeRepoPath
+  // + membership): it restricts which planned files the diff covers and never
+  // touches the file system.
+  const diff = buildCommitAgentTools({ service: new CommitAgentService({ dataDir: '/tmp/unused' }), resolveWorkspace: async () => null })
+    .find((t) => t.name === 'commit_agent_diff')
+  assert.ok(diff, 'commit_agent_diff must exist')
+  assert.equal('path' in ((diff.parameters as { properties?: Record<string, unknown> }).properties ?? {}), true)
+  for (const tool of tools) {
+    if (tool.name === 'commit_agent_diff') continue
+    const properties = (tool.parameters as { properties?: Record<string, unknown> }).properties ?? {}
+    assert.equal('path' in properties, false, `${tool.name} must not accept "path"`)
   }
 })
 
@@ -311,6 +324,70 @@ test('inspect serves recent and reconcile; diff is a dedicated tool', async () =
     const statusText = toolNamed(tools, 'commit_agent_inspect').output.render({}, statusAfter).map((b) => b.text).join('\n')
     assert.match(statusText, /digest [0-9a-f]{16,}/)
     assert.ok(!statusText.includes('digest undefined'), 'the plan digest must be rendered from the status projection')
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('commit_agent_diff filters a plan preview by commit and by path', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    await writeFile(fixture.root, 'src/a.txt', 'alpha\n')
+    await writeFile(fixture.root, 'src/b.txt', 'beta\n')
+    const { tools } = toolsFor(fixture)
+    const exec = execContext()
+
+    const status = (await toolNamed(tools, 'commit_agent_inspect').execute({}, exec)) as Record<string, unknown>
+    const changes = status['changes'] as Array<Record<string, unknown>>
+    const changeOf = (path: string): string => {
+      const entry = changes.find((c) => c['path'] === path)
+      assert.ok(entry, `no change for ${path}`)
+      return entry['changeId'] as string
+    }
+    const published = (await toolNamed(tools, 'commit_agent_prepare_plan').execute(
+      {
+        commits: [
+          { message: 'feat: a', changes: [changeOf('src/a.txt')] },
+          { message: 'feat: b', changes: [changeOf('src/b.txt')] },
+        ],
+      },
+      exec,
+    )) as Record<string, unknown>
+    const planId = (published['plan'] as Record<string, unknown>)['planId'] as string
+
+    // No filter: every commit is rendered.
+    const full = (await toolNamed(tools, 'commit_agent_diff').execute({ planId }, exec)) as Record<string, unknown>
+    assert.match(full['patch'] as string, /### c1/)
+    assert.match(full['patch'] as string, /### c2/)
+
+    // commitId: only that commit, and the whole byte budget spans it.
+    const one = (await toolNamed(tools, 'commit_agent_diff').execute({ planId, commitId: 'c1' }, exec)) as Record<string, unknown>
+    assert.match(one['patch'] as string, /### c1/)
+    assert.ok(!(one['patch'] as string).includes('### c2'))
+    assert.ok((one['patch'] as string).includes('alpha'))
+    assert.ok(!(one['patch'] as string).includes('beta'))
+
+    // path (with commitId): only that file of that commit.
+    const pathOnly = (await toolNamed(tools, 'commit_agent_diff').execute(
+      { planId, commitId: 'c1', path: 'src/a.txt' },
+      exec,
+    )) as Record<string, unknown>
+    assert.ok((pathOnly['patch'] as string).includes('alpha'))
+    assert.ok(!(pathOnly['patch'] as string).includes('beta'))
+
+    // Unknown commit / path are refused instead of returning an empty diff.
+    await assert.rejects(
+      () => Promise.resolve(toolNamed(tools, 'commit_agent_diff').execute({ planId, commitId: 'nope' }, exec)),
+      (error: unknown) => (error as { code?: string }).code === 'BAD_ARGUMENT',
+    )
+    await assert.rejects(
+      () => Promise.resolve(toolNamed(tools, 'commit_agent_diff').execute({ planId, path: 'nope.txt' }, exec)),
+      (error: unknown) => (error as { code?: string }).code === 'BAD_ARGUMENT',
+    )
+    // Path traversal is rejected before it reaches git pathspecs.
+    await assert.rejects(
+      () => Promise.resolve(toolNamed(tools, 'commit_agent_diff').execute({ planId, path: '../outside.txt' }, exec)),
+    )
   } finally {
     await fixture.cleanup()
   }
