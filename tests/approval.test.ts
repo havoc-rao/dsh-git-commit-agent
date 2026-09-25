@@ -307,11 +307,12 @@ test('the review document is deterministic and carries the digest and exclusions
     assert.ok(review.detail.includes('because a'))
     assert.ok(review.detail.includes('separate concern'))
     assert.ok(review.detail.includes(version.planDigest.slice(0, 16)))
-    // The file list comes from the frozen review detail: paths with status and
-    // layer, and the never-truncated stat — not content-addressed change ids.
+    // The file list comes from the frozen review detail: paths plus the
+    // git/VSCode status symbol in porcelain XY form, and the never-truncated
+    // stat — not content-addressed change ids. An untracked file renders `??`.
     assert.ok(review.detail.includes('a.txt'))
-    // Untracked files carry status `untracked` on the untracked layer.
-    assert.ok(review.detail.includes('— untracked [untracked]'))
+    assert.ok(review.detail.includes('??` a.txt'))
+    assert.ok(review.detail.includes('_Status symbols: `XY`'))
     assert.ok(review.detail.includes('_Files: 1, +1/-0_'))
     assert.ok(!review.detail.includes(entries[0]?.['changeId'] as string))
     assert.equal(review.detail, buildPlanReview(version).detail, 'the review must be deterministic')

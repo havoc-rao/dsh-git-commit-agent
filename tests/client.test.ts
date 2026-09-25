@@ -485,6 +485,7 @@ test('the plan card renders summary, details, exclusions and a versioned propose
         changes: [
           { changeId: 'x1', path: 'src/a.ts', layer: 'worktree', status: 'modified' },
           { changeId: 'x2', oldPath: 'old/a.ts', path: 'src/a.ts', layer: 'worktree', status: 'renamed', binary: true },
+          { changeId: 'x5', path: 'src/indexed.ts', layer: 'index', status: 'modified' },
         ],
         dependsOn: [],
       },
@@ -493,7 +494,7 @@ test('the plan card renders summary, details, exclusions and a versioned propose
         message: 'test: cover a',
         patch: 'diff --git a/b b/b\n',
         stat: { files: 1, additions: 3, deletions: 0 },
-        changes: [{ changeId: 'x3', path: 'src/a.test.ts', layer: 'untracked', status: 'added' }],
+        changes: [{ changeId: 'x3', path: 'src/a.test.ts', layer: 'untracked', status: 'untracked' }],
         dependsOn: ['c1'],
       },
     ],
@@ -526,6 +527,12 @@ test('the plan card renders summary, details, exclusions and a versioned propose
   assert.ok(text.includes('暂不提交 1 项'))
   assert.ok(text.includes('tmp.log'))
   assert.ok(text.includes('a warning'))
+  // Per-file rows carry the git/VSCode status symbol with the layer, e.g.
+  // `M 未暂存`, `M 已暂存`, `R 未暂存 … →`, `? 未跟踪`.
+  assert.ok(text.includes('M 未暂存 · src/a.ts'))
+  assert.ok(text.includes('M 已暂存 · src/indexed.ts'))
+  assert.ok(text.includes('R 未暂存 · old/a.ts → src/a.ts [二进制]'))
+  assert.ok(text.includes('? 未跟踪 · src/a.test.ts'))
   // The revision delta answers "what changed since I last declined". Target
   // commits render as their position (2), source commits by id (c1) — the
   // previous revision's numbering is not carried.
