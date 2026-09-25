@@ -6,10 +6,14 @@ exact plan revision does.
 
 ## 1. No general-purpose privilege
 
-- The plugin exposes **five closed tools** (`src/host/tools.ts`: one read tool
-  `commit_agent_inspect` with status/diff/files/recent/reconcile modes, plus
-  publish, approval, execute and cancel). There is no shell tool, no arbitrary
-  git invocation, no `cwd`, no file write, no network and no delegation.
+- The plugin exposes **five closed tools** (`src/host/tools.ts`:
+  `commit_agent_inspect` with status/recent/reconcile modes,
+  `commit_agent_diff`, `commit_agent_read_files`,
+  `commit_agent_prepare_plan`, `commit_agent_apply_plan`). There is no shell
+  tool, no arbitrary git invocation, no `cwd`, no file write, no network and no
+  delegation. Cancellation is not a model tool: execution runs synchronously
+  inside `apply_plan`, and the host stops a running execution through
+  `service.cancel()` / the AbortSignal path.
 - Every git argument array is constructed by `GitRunner` (`src/core/git/runner.ts`).
   No caller can supply a subcommand or an option.
 - Processes are spawned with `execFile` (never a shell).

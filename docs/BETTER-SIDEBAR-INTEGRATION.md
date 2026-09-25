@@ -136,4 +136,4 @@ component calling `registerGitCommitAction`, and no code calling `openTab` with
 a `proposed` diff. Implementing that requires a bundled client entry
 (`dsh.client` platform web) in this package. Until then the flow is driven
 through the plugin's own business API (`startDedicatedSession`), and the plan
-preview is rendered from the `commit_agent_publish_plan` tool result.
+preview is rendered from the `commit_agent_prepare_plan` tool result.

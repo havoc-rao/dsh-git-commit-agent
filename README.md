@@ -65,11 +65,11 @@ calling the dedicated-session API on a host without one fails with a clear
 
 | Tool | Purpose |
 | --- | --- |
-| `commit_agent_inspect` | the single read tool, `mode=status` (default: HEAD, branch, index state, index rule, in-progress operations, every pending change with a content-addressed `changeId`, existing plan revisions) / `mode=diff` (current or per-plan diff, optionally one change) / `mode=files` (bounded reads, secrets excluded with a reason) / `mode=recent` (subjects for style) / `mode=reconcile` (match real history against a plan) |
-| `commit_agent_publish_plan` | publish a new immutable plan revision; the host validates, computes every expected tree, returns the preview |
-| `commit_agent_request_approval` | ask the human to approve exactly one revision, through the host's own plan-review panel; the host records the decision |
-| `commit_agent_execute_plan` | execute a revision the **user** approved; the host verifies approval, snapshot and staged tree |
-| `commit_agent_cancel_execution` | request cancellation at the next safe boundary |
+| `commit_agent_inspect` | the single state tool, `mode=status` (default: HEAD, branch, index state, index rule, in-progress operations, every pending change with a content-addressed `changeId`, existing plan revisions) / `mode=recent` (subjects for style) / `mode=reconcile` (match one plan revision against real history after a crash or failed execution) |
+| `commit_agent_diff` | the single diff reader: the full working-tree diff, one change's diff, or the exact per-commit diff a planned revision would introduce |
+| `commit_agent_read_files` | the single file reader: bounded contents of specific repository paths; secrets and binaries excluded with a reason |
+| `commit_agent_prepare_plan` | prepare a new immutable plan revision; the host validates, computes every expected tree, returns the preview |
+| `commit_agent_apply_plan` | submit one revision to the human's plan-review panel and, once approved, execute it; the host verifies approval, digest, snapshot and staged tree |
 
 There is no shell, no arbitrary git invocation, no `cwd`, no file write, no
 network and no delegation tool.
@@ -80,9 +80,11 @@ The model can propose, preview and explain — it can never approve. Approval go
 through the host's own question surface using the `plan-review` intent
 (`ctx.userQuestions.ask({ ... intent: { kind: 'plan-review', approve: 'Approve' } })`),
 so the user sees the plan document the content digest covers and answers through
-a host-owned protocol. `commit_agent_request_approval` submits one exact
-revision; a decline is a normal outcome, and a newer revision revokes an older
-approval. `approvedBy` is recorded as `user:plan-review` — an audit label, not a
+a host-owned protocol. `commit_agent_apply_plan` submits one exact
+revision; a decline is a normal outcome (the user's free-text feedback reaches
+the model), and a newer revision revokes an older approval. Only after the
+decision does the host execute — the same call returns the execution result.
+`approvedBy` is recorded as `user:plan-review` — an audit label, not a
 cryptographic identity: DSH has no authenticated in-process user identity, and
 any in-process plugin can call the business API's `approvePlan` directly.
 
@@ -92,6 +94,11 @@ any in-process plugin can call the business API's `approvePlan` directly.
 the commit row (next to the built-in Commit button; its tooltip reads
 **在新会话中规划并提交这些变更**). The plugin opens a new session in the selected
 worktree, seeds the planning request and submits it.
+
+The entry is usable as soon as `git status` shows **any** change — staged,
+unstaged or untracked. With an empty index the plan stages the working-tree
+changes itself before committing (per PLAN §7, index-empty mode); you never
+have to `git add` first.
 
 An ordinary chat session does **not** see the commit tools, and cannot start
 this workflow by asking. The five tools are installed into exactly one agent
@@ -144,12 +151,15 @@ it grouped. The host-side `startDedicatedSession` API does the same through
 
 Either way the flow is the same:
 
-1. the agent calls `commit_agent_inspect` (mode=status), reads the real diffs, and publishes a plan;
+1. the agent calls `commit_agent_inspect` (mode=status), reads the real diffs
+   (`commit_agent_diff`) and file contents (`commit_agent_read_files`), and
+   prepares a plan (`commit_agent_prepare_plan`);
 2. the plan appears as a transcript card, and each commit can be opened as a
    proposed diff in the sidebar's DiffPane;
-3. the agent calls `commit_agent_request_approval` and you decide in the host's
+3. the agent calls `commit_agent_apply_plan` and you decide in the host's
    plan-review panel;
-4. only after your approval does the agent call `commit_agent_execute_plan`.
+4. only after your approval does the host execute — the same call then returns
+   the execution result (commits landed, or why it stopped).
 
 The client half is one hand-written lazy-CJS file (`client/client.js`): no
 bundler, no JSX, no CSS modules, and no typert Remote — the button uses only
