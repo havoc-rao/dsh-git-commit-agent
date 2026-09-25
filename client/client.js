@@ -70,6 +70,15 @@ window.__ModuleLoader__.load({
       'border-radius:3px;background:transparent;color:inherit;font:inherit;font-size:11px;cursor:pointer}',
       '.dsh-gca-card button:hover{background:var(--dsh-color-hover,rgba(127,127,127,.15))}',
       '.dsh-gca-row{display:flex;align-items:baseline;gap:6px}',
+      '.dsh-gca-hidden{display:none}',
+      '.dsh-gca-stat{opacity:.75;font-size:11px;white-space:nowrap}',
+      '.dsh-gca-note{opacity:.7;font-size:11px}',
+      '.dsh-gca-warning{opacity:.85;font-size:11px;margin-top:6px}',
+      '.dsh-gca-details{margin-top:4px;padding:6px 8px;border:1px solid var(--dsh-color-border,#3c3c3c);',
+      'border-radius:4px;font-size:11px;line-height:1.6}',
+      '.dsh-gca-files{margin:4px 0 2px;padding-left:16px;font-size:11px;line-height:1.6}',
+      '.dsh-gca-card .dsh-gca-meta details>summary{cursor:pointer;font-size:11px}',
+      '.dsh-gca-card .dsh-gca-meta details>div{margin-top:4px;font-size:10px;line-height:1.7;word-break:break-all}',
     ].join('')
 
     /** Inject the plugin stylesheet once, from inside the factory. */
@@ -220,18 +229,36 @@ window.__ModuleLoader__.load({
       return sessionId
     }
 
-    /** Open one planned commit's diff in the sidebar's DiffPane. */
-    function openPlanDiff(ctx, planId, block) {
+    /**
+     * Open one planned commit's diff in the sidebar's DiffPane.
+     *
+     * The tab identity is scoped to task-independent key + planId + REVISION +
+     * commitId so two revisions of the same plan never collide in the bottom
+     * workbench's dedupe. The title states the revision, so a re-opened tab is
+     * recognisable even when several revisions were reviewed in a row. An
+     * explicit scope targets the initiating session's sidebar state instead of
+     * whatever session happens to be active.
+     */
+    function openPlanDiff(ctx, planId, revision, block, sessionId) {
       const sidebar = service(ctx, 'betterSidebar')
       if (!sidebar || typeof sidebar.openTab !== 'function') return false
-      const id = DIFF_ID_PREFIX + ':' + planId + ':' + block.commitId
-      const title = '计划 ' + block.commitId + '：' + String(block.message || '').split('\n')[0]
-      sidebar.openTab({
-        type: 'diff',
+      const id = DIFF_ID_PREFIX + ':' + planId + ':' + revision + ':' + block.commitId
+      const subject = String(block.message || '').split('\n')[0]
+      const title = '计划 v' + String(revision) + ' · ' + block.commitId + ' · ' + subject
+      // Integrity metadata for the sidebar (display-only): `truncated` marks a
+      // capped preview, `sourceRef` labels what snapshot this patch is, so a
+      // stale tab stays identifiable after later revisions.
+      const diff = {
+        kind: 'proposed',
         id: id,
         title: title,
-        diff: { kind: 'proposed', id: id, title: title, patch: block.patch || '' },
-      })
+        patch: block.patch || '',
+        ...(block.patchTruncated === true ? { truncated: true } : {}),
+        ...(typeof planId === 'string' ? { sourceRef: 'plan ' + planId + ' rev ' + String(revision) } : {}),
+      }
+      const seed = { type: 'diff', id: id, title: title, diff: diff }
+      const scope = typeof sessionId === 'string' && sessionId !== '' ? { sessionId: sessionId } : undefined
+      sidebar.openTab(seed, scope)
       return true
     }
 
@@ -318,21 +345,84 @@ window.__ModuleLoader__.load({
       return meta
     }
 
+    /** Short Chinese label for a change status. */
+    const STATUS_LABELS = {
+      added: '新增',
+      modified: '修改',
+      deleted: '删除',
+      renamed: '重命名',
+      copied: '复制',
+      typechange: '类型变更',
+      unmerged: '冲突',
+      untracked: '未跟踪',
+      unknown: '未知',
+    }
+
+    /** Readable layer label. */
+    function layerLabel(layer) {
+      if (layer === 'index') return '已暂存'
+      if (layer === 'worktree') return '未暂存'
+      return '未跟踪'
+    }
+
+    /** `3 文件 · +82/-16` from a preview stat, or an empty string. */
+    function statText(stat) {
+      if (!stat || typeof stat !== 'object') return ''
+      const files = Number(stat.files) || 0
+      const additions = Number(stat.additions) || 0
+      const deletions = Number(stat.deletions) || 0
+      return files + ' 文件 · +' + additions + '/-' + deletions
+    }
+
     /** The transcript card for one published plan. */
     function PlanCard(props) {
       const block = props.block
       const meta = planMetaOf(block)
       const openDiff = props.openDiff
+      const sessionId = props.sessionId
       if (meta === null) {
         return h('div', { className: 'dsh-gca-card' }, '正在整理提交计划…')
       }
       const blockers = Array.isArray(meta.blockers) ? meta.blockers : []
+      const warnings = Array.isArray(meta.warnings) ? meta.warnings : []
       const preview = Array.isArray(meta.preview) ? meta.preview : []
+      const excluded = Array.isArray(meta.excludedChanges) ? meta.excludedChanges : []
+      const commits = Array.isArray(meta.commits) ? meta.commits : []
+      // Subject lookup across the whole plan (used for readable dependsOn).
+      const subjectOf = function (commitId) {
+        const found = commits.find(function (commit) { return commit.id === commitId })
+        if (found) return String(found.message || '').split('\n')[0]
+        const entry = preview.find(function (item) { return item.commitId === commitId })
+        return entry ? String(entry.message || '').split('\n')[0] : commitId
+      }
+      const indexOf = function (commitId) {
+        const index = preview.findIndex(function (entry) { return entry.commitId === commitId })
+        return index < 0 ? '' : String(index + 1) + ' '
+      }
+      // Expanded sections, keyed per card instance.
+      const [expanded, setExpanded] = React.useState({})
+      const toggle = function (key) {
+        setExpanded(function (current) {
+          const next = Object.assign({}, current)
+          if (next[key] === true) delete next[key]
+          else next[key] = true
+          return next
+        })
+      }
+      const isOpen = function (key) { return expanded[key] === true }
+
+      const totalFiles = preview.reduce(function (sum, entry) {
+        const stat = entry.stat && typeof entry.stat === 'object' ? entry.stat : null
+        return sum + (stat !== null ? Number(stat.files) || 0 : Array.isArray(entry.changes) ? entry.changes.length : 0)
+      }, 0)
+      const truncated = meta.previewTruncated === true
+
       const children = [
         h(
           'h4',
           { key: 'title' },
-          '提交计划 revision ' + String(meta.revision) + ' — ' + preview.length + ' 个提交',
+          '提交计划 revision ' + String(meta.revision) + ' — ' + preview.length + ' 个提交'
+            + (totalFiles > 0 ? ' · ' + totalFiles + ' 个文件' : ''),
         ),
       ]
       if (blockers.length > 0) {
@@ -352,34 +442,182 @@ window.__ModuleLoader__.load({
           { key: 'commits' },
           preview.map(function (entry, index) {
             const subject = String(entry.message || '').split('\n')[0]
+            const stat = entry.stat && typeof entry.stat === 'object' ? entry.stat : null
+            const rowChildren = [
+              h('span', null, String(index + 1) + ' ' + subject),
+              stat !== null ? h('span', { className: 'dsh-gca-stat' }, statText(stat)) : null,
+              entry.patchTruncated === true ? h('span', { className: 'dsh-gca-note' }, '部分预览') : null,
+              h(
+                'button',
+                {
+                  type: 'button',
+                  onClick: function () { toggle('details:' + entry.commitId) },
+                },
+                isOpen('details:' + entry.commitId) ? '收起明细' : '明细',
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  onClick: function () {
+                    openDiff(Object.assign({}, entry, { planId: meta.planId, revision: meta.revision }), sessionId)
+                  },
+                },
+                '查看差异',
+              ),
+            ]
+            const detailRows = []
+            if (entry.rationale && String(entry.rationale).trim() !== '') {
+              detailRows.push(h('div', { key: 'rationale' }, String(entry.rationale).trim()))
+            }
+            const depends = Array.isArray(entry.dependsOn) ? entry.dependsOn : []
+            if (depends.length > 0) {
+              detailRows.push(
+                h(
+                  'div',
+                  { key: 'depends' },
+                  '依赖：' + depends.map(function (dep) { return indexOf(dep) + subjectOf(dep) }).join('，'),
+                ),
+              )
+            }
+            const files = Array.isArray(entry.changes) ? entry.changes : []
+            detailRows.push(
+              h(
+                'ul',
+                { key: 'files', className: 'dsh-gca-files' },
+                files.map(function (change) {
+                  const label = STATUS_LABELS[change.status] || String(change.status || '?')
+                  const rename = change.oldPath ? String(change.oldPath) + ' → ' : ''
+                  const marker = change.binary === true ? ' [二进制]' : ''
+                  return h(
+                    'li',
+                    { key: change.changeId || change.path },
+                    label + ' · ' + layerLabel(change.layer) + ' · ' + rename + change.path + marker,
+                  )
+                }),
+              ),
+            )
             return h(
               'li',
               { key: entry.commitId || index },
+              h('div', { className: 'dsh-gca-row' }, rowChildren),
+              // Hidden via CSS while collapsed so the DOM always carries the
+              // details.
               h(
                 'div',
-                { className: 'dsh-gca-row' },
-                h('span', null, entry.commitId + '：' + subject),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    onClick: function () {
-                      openDiff(Object.assign({}, entry, { planId: meta.planId }))
-                    },
-                  },
-                  '查看差异',
-                ),
+                { className: isOpen('details:' + entry.commitId) ? 'dsh-gca-details' : 'dsh-gca-details dsh-gca-hidden' },
+                detailRows,
               ),
             )
           }),
         ),
       )
+      if (warnings.length > 0) {
+        children.push(
+          h(
+            'div',
+            { key: 'warnings', className: 'dsh-gca-warning' },
+            warnings.map(function (warning, index) {
+              return h('div', { key: index }, '注意：' + String(warning))
+            }),
+          ),
+        )
+      }
+      // What changed since the previous revision of this plan.
+      const deltaEntries = meta.delta
+        && typeof meta.delta === 'object'
+        && Array.isArray(meta.delta.entries)
+        ? meta.delta.entries
+        : []
+      if (deltaEntries.length > 0) {
+        const describe = function (entry) {
+          const path = typeof entry.path === 'string' ? entry.path : null
+          const target = typeof entry.commitId === 'string' ? indexOf(entry.commitId).trim() : ''
+          const from = typeof entry.fromCommitId === 'string' ? entry.fromCommitId : null
+          switch (entry.kind) {
+            case 'commit-added': return '新增提交 ' + target
+            case 'file-added': return (path || '文件') + ' 加入提交 ' + target
+            case 'file-moved': return (path || '文件') + ' 从提交 ' + (from || '?') + ' 移入提交 ' + target
+            case 'file-excluded': return (path || '文件') + ' 变为暂不提交' + (from !== null ? '（原在提交 ' + from + '）' : '')
+            case 'message-changed': return '提交 ' + target + ' 的消息已更新'
+            default: return String(entry.kind || '')
+          }
+        }
+        children.push(
+          h(
+            'div',
+            { key: 'delta' },
+            h(
+              'button',
+              { type: 'button', onClick: function () { toggle('delta') } },
+              '相对上一版（rev ' + String(meta.delta.fromRevision) + '）' + deltaEntries.length + ' 项'
+                + (isOpen('delta') ? '（收起）' : ''),
+            ),
+            h(
+              'ul',
+              { className: isOpen('delta') ? 'dsh-gca-files' : 'dsh-gca-files dsh-gca-hidden' },
+              deltaEntries.map(function (entry, index) {
+                return h('li', { key: index }, describe(entry))
+              }),
+            ),
+          ),
+        )
+      }
+      if (excluded.length > 0) {
+        children.push(
+          h(
+            'div',
+            { key: 'excluded' },
+            h(
+              'button',
+              { type: 'button', onClick: function () { toggle('excluded') } },
+              '暂不提交 ' + excluded.length + ' 项' + (isOpen('excluded') ? '（收起）' : ''),
+            ),
+            h(
+              'ul',
+              { className: isOpen('excluded') ? 'dsh-gca-files' : 'dsh-gca-files dsh-gca-hidden' },
+              excluded.map(function (entry, index) {
+                return h('li', { key: entry.changeId || index }, String(entry.path) + ' — ' + String(entry.reason))
+              }),
+            ),
+          ),
+        )
+      }
+      if (truncated) {
+        children.push(
+          h(
+            'div',
+            { key: 'truncated', className: 'dsh-gca-note' },
+            '部分提交的差异预览因体积限制被截断；统计与文件清单仍然完整，完整差异可按需读取。',
+          ),
+        )
+      }
       children.push(
         h(
           'div',
           { key: 'meta', className: 'dsh-gca-meta' },
-          'digest ' + String(meta.planDigest || '').slice(0, 16) + '…'
-            + (blockers.length === 0 ? ' · 等待你在审批面板中确认' : ' · 请先解决阻塞项'),
+          (meta.indexStrategy === 'reuse-existing-index' ? '复用已暂存内容（首个提交包含全部已暂存变更） · ' : '')
+            + (blockers.length === 0 ? '等待你在审批面板中确认' : '请先解决阻塞项'),
+        ),
+      )
+      children.push(
+        h(
+          'details',
+          { key: 'tech', className: 'dsh-gca-meta' },
+          h('summary', null, '技术信息'),
+          h(
+            'div',
+            null,
+            h('div', null, 'plan ' + String(meta.planId) + ' · digest ' + String(meta.planDigest || '').slice(0, 16) + '…'),
+            preview.map(function (entry, index) {
+              return h(
+                'div',
+                { key: entry.commitId || index },
+                String(index + 1) + ' ' + entry.commitId + '：tree ' + String(entry.baseTree || '').slice(0, 12)
+                  + ' → ' + String(entry.expectedTree || '').slice(0, 12),
+              )
+            }),
+          ),
         ),
       )
       return h('div', { className: 'dsh-gca-card' }, children)
@@ -454,8 +692,9 @@ window.__ModuleLoader__.load({
           yield ctx.slots.register({ name: 'tool.call.toolview', key: PREPARE_TOOL }, function (props) {
             return h(PlanCard, {
               block: props.block,
-              openDiff: function (entry) {
-                openPlanDiff(ctx, entry && entry.planId, entry)
+              sessionId: props.sessionId,
+              openDiff: function (entry, sessionId) {
+                openPlanDiff(ctx, entry && entry.planId, entry && entry.revision, entry, sessionId)
               },
             })
           })

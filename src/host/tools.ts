@@ -151,6 +151,7 @@ function summariseChange(change: ChangeRecord): Record<string, unknown> {
 
 /** Summarise a plan version for the model. */
 function summarisePlan(plan: PlanVersion): Record<string, unknown> {
+  const detailById = new Map((plan.reviewDetail?.commits ?? []).map((d) => [d.id, d]))
   return {
     planId: plan.planId,
     revision: plan.revision,
@@ -158,18 +159,46 @@ function summarisePlan(plan: PlanVersion): Record<string, unknown> {
     planDigest: plan.planDigest,
     indexStrategy: plan.indexStrategy,
     approved: plan.approval !== null,
-    commits: plan.commits.map((commit) => ({
-      id: commit.id,
-      message: commit.message,
-      rationale: commit.rationale,
-      dependsOn: [...commit.dependsOn],
-      changes: [...commit.changes],
-      expectedTree: commit.expectedTree,
-    })),
+    commits: plan.commits.map((commit) => {
+      const detail = detailById.get(commit.id)
+      return {
+        id: commit.id,
+        message: commit.message,
+        rationale: commit.rationale,
+        dependsOn: [...commit.dependsOn],
+        changes: [...commit.changes],
+        expectedTree: commit.expectedTree,
+        ...(detail === undefined
+          ? {}
+          : { files: detail.changes.length, stat: { ...detail.stat } }),
+      }
+    }),
     excludedChanges: plan.excludedChanges.map((e) => ({ changeId: e.changeId, path: e.path, reason: e.reason })),
     blockers: plan.blockers.map((b) => ({ code: b.code, message: b.message, ...(b.subject === undefined ? {} : { subject: b.subject }) })),
     warnings: [...plan.warnings],
+    ...(plan.delta === undefined ? {} : { delta: plan.delta }),
   }
+}
+
+/** One line per delta entry, capped at `maxEntries` with a remainder note. */
+function renderDeltaLines(delta: Record<string, unknown>, maxEntries: number): string[] {
+  const from = String(delta['fromRevision'] ?? '?')
+  const entries = (delta['entries'] as Array<Record<string, unknown>> | undefined) ?? []
+  const describe = (entry: Record<string, unknown>): string => {
+    const path = entry['path'] === undefined ? '' : ` ${String(entry['path'])}`
+    const fromCommit = entry['fromCommitId'] === undefined ? '' : ` (was ${String(entry['fromCommitId'])})`
+    switch (entry['kind']) {
+      case 'commit-added': return `  added commit ${String(entry['commitId'])}`
+      case 'file-added': return `  added to ${String(entry['commitId'])}:${path}`
+      case 'file-moved': return `  moved ${path}${fromCommit} → ${String(entry['commitId'])}`
+      case 'file-excluded': return `  excluded:${path}${fromCommit}`
+      case 'message-changed': return `  message updated for ${String(entry['commitId'])}`
+      default: return `  changed: ${String(entry['kind'])}`
+    }
+  }
+  const lines = entries.slice(0, maxEntries).map(describe)
+  if (entries.length > maxEntries) lines.push(`  … and ${entries.length - maxEntries} more`)
+  return lines.length === 0 ? [] : [`changed since rev ${from}:`, ...lines]
 }
 
 /** Resolve the task bound to the calling agent, opening one from cwd if needed. */
@@ -313,7 +342,9 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
     name: 'commit_agent_diff',
     description:
       'Read the real diff text for the bound worktree. With planId (and optionally revision) the exact diff each '
-      + 'planned commit of that revision would introduce, rendered per commit; a missing revision previews the '
+      + 'planned commit of that revision would introduce, rendered per commit; with commitId only that one '
+      + 'commit, and with path only that file of it — the whole byte budget then goes to the filtered diff, so a '
+      + 'large file can be read in full while the whole-plan preview stays capped. A missing revision previews the '
       + 'newest revision of the plan. With changeId the current working-tree diff of that one change alone. With '
       + 'neither, the full reviewable working-tree diff (staged + unstaged + untracked) the plan is built from. '
       + 'This tool never changes the repository. Never guess what a change contains from its path or extension — '
@@ -321,6 +352,8 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
     parameters: parameters({
       planId: stringProp('Plan id: preview the diff each planned commit would introduce.'),
       revision: numberProp('Plan revision for the preview; defaults to the newest revision of that plan.'),
+      commitId: stringProp('Plan commit id: restrict the preview to that one commit (requires planId).'),
+      path: stringProp('Repository-relative path: restrict the preview to that file (requires planId; must be part of the plan).'),
       changeId: stringProp('Restrict the working-tree diff to one current changeId (ignored when planId is set).'),
       maxBytes: numberProp('Maximum patch bytes (default 131072).'),
     }),
@@ -332,11 +365,13 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
     },
     async execute(args, exec): Promise<unknown> {
       try {
-        const a = args as { planId?: string; revision?: number; changeId?: string; maxBytes?: number }
+        const a = args as { planId?: string; revision?: number; commitId?: string; path?: string; changeId?: string; maxBytes?: number }
         const taskId = await requireTaskId(deps, exec)
         const result = await service.diff(taskId, {
           ...(a.planId === undefined ? {} : { planId: a.planId }),
           ...(a.revision === undefined ? {} : { revision: a.revision }),
+          ...(a.commitId === undefined ? {} : { commitId: a.commitId }),
+          ...(a.path === undefined ? {} : { path: a.path }),
           ...(a.changeId === undefined ? {} : { changeId: a.changeId }),
           ...(a.maxBytes === undefined ? {} : { maxBytes: a.maxBytes }),
           signal: exec.signal as AbortSignal,
@@ -443,6 +478,7 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
       presentationMeta: (_args, value) => {
         const v = value as Record<string, unknown>
         const plan = (v['plan'] as Record<string, unknown> | undefined) ?? {}
+        const preview = (v['preview'] as Array<Record<string, unknown>> | undefined) ?? []
         return {
           taskId: v['taskId'] ?? null,
           planId: plan['planId'] ?? null,
@@ -455,19 +491,32 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
           warnings: plan['warnings'] ?? [],
           commits: plan['commits'] ?? [],
           excludedChanges: plan['excludedChanges'] ?? [],
-          preview: v['preview'] ?? [],
+          reviewDetail: v['reviewDetail'] ?? null,
+          delta: plan['delta'] ?? null,
+          preview: preview,
+          previewTruncated: preview.some((block) => block['patchTruncated'] === true),
         } as never
       },
       render: textRender((v: Record<string, unknown>) => {
         const plan = (v['plan'] as Record<string, unknown> | undefined) ?? {}
         const blockers = (plan['blockers'] as Array<Record<string, unknown>> | undefined) ?? []
         const preview = (v['preview'] as Array<Record<string, unknown>> | undefined) ?? []
+        const excluded = (plan['excludedChanges'] as Array<Record<string, unknown>> | undefined) ?? []
+        const delta = (plan['delta'] as Record<string, unknown> | undefined)
         const head = `plan ${String(plan['planId'])} revision ${String(plan['revision'])} — ${blockers.length === 0 ? 'ready for approval' : `${blockers.length} blocker(s)`}`
         const blockerLines = blockers.map((b) => `  BLOCKER ${String(b['code'])}: ${String(b['message'])}`)
-        const previewLines = preview.map(
-          (p) => `  ${String(p['commitId'])}: ${String(p['message']).split('\n')[0]} (tree ${String(p['expectedTree'])})`,
-        )
-        return [head, ...blockerLines, 'Preview:', ...previewLines].join('\n')
+        const previewLines = preview.map((p) => {
+          const stat = (p['stat'] as Record<string, unknown> | undefined)
+          const statText = stat === undefined
+            ? ''
+            : ` (${String(stat['files'])} file(s), +${String(stat['additions'])}/-${String(stat['deletions'])}${p['patchTruncated'] === true ? ', preview truncated' : ''})`
+          return `  ${String(p['commitId'])}: ${String(p['message']).split('\n')[0]}${statText} (tree ${String(p['expectedTree'])})`
+        })
+        const excludedLine = excluded.length === 0 ? [] : [`  excluded: ${excluded.length} change(s)`]
+        const deltaLines = delta === undefined
+          ? []
+          : renderDeltaLines(delta, 8)
+        return [head, ...blockerLines, 'Preview:', ...previewLines, ...excludedLine, ...deltaLines].join('\n')
       }),
     },
     async execute(args, exec): Promise<unknown> {
@@ -488,6 +537,7 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
         return {
           taskId,
           plan: summarisePlan(published.plan),
+          reviewDetail: published.plan.reviewDetail ?? null,
           preview: published.preview.map((block) => ({
             commitId: block.commitId,
             message: block.message,
@@ -496,6 +546,7 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
             changes: block.changes.map((c) => ({ ...c })),
             baseTree: block.baseTree,
             expectedTree: block.expectedTree,
+            stat: { ...block.stat },
             patch: block.patch,
             patchTruncated: block.patchTruncated,
           })),
