@@ -32,8 +32,9 @@ GitLens entry ──▶ dedicated native session ──▶ status/diff analysis
 | P3 — hunk-level splitting, chat approval protocol | not started (by design) |
 | GitLens button + DiffPane plan preview | **implemented** in `client/client.js` against the delivered better-sidebar seams; the boot graph carries the entry and the bundle is served — the browser render itself is not yet verified (see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §8.7) |
 | Live DSH host integration | **verified twice** on 2026-09-14 (headless profile, scratch `DSH_HOME`): bare mount with `inject: ['tools']` only, restricted 8-tool surface, guard denial, session visibility, uninstall disposal and a real commit — see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §7. The two rounds found and fixed three defects (missing lazy `agents` lookup; `followup` payload shape; default `dataDir` ignoring `DSH_HOME`) |
+| Agent preset registration | **implemented**: the plugin registers itself as the `git-commit` agent preset through the host's `ctx.agentPresets.register()` (the same API the declarative `@deepseek-ai/dsh-agent-preset` plugin wraps), so it appears as a card in Settings → Agent presets; dedicated sessions bind that preset (`meta.agentPreset` + `agentPresets.mount`, the webhook session creator's pattern). Not yet verified on a live host (see [Preset registration](#agent-preset-registration)) |
 
-89 automated tests pass against real, isolated git repositories (`npm test`).
+122 automated tests pass against real, isolated git repositories (`npm test`).
 
 ## Prerequisites
 
@@ -60,6 +61,74 @@ The bundle mounts itself through `dsh.bundle.patch` in `package.json` and
 The plugin mounts with `inject: ['tools']`. The agent registry is used lazily;
 calling the dedicated-session API on a host without one fails with a clear
 `INTERNAL` error instead of degrading silently.
+
+## Agent preset registration
+
+On a host with the agent-preset registry (`agentPresets` service), the plugin
+registers itself as the **`git-commit`** agent preset from `apply()`:
+
+```ts
+ctx.agentPresets.register({
+  id: 'git-commit',          // COMMIT_AGENT_PRESET_ID
+  name: 'Git Commit Agent',
+  order: 30,
+  plugins: [],               // deliberate — see below
+})
+```
+
+This is the same API the declarative `@deepseek-ai/dsh-agent-preset` plugin
+row wraps (`PresetDefinition`), just invoked from the plugin's own mount so the
+definition cannot drift from this plugin's code. What it buys:
+
+- the preset appears as a card in **Settings → Agent presets**
+  (`ui-agent-preset` `AgentPresetSection`): viewable (its composition YAML) and
+  selectable as the default — with zero client-side changes;
+- dedicated sessions **bind** that preset: the create/resume `setup` calls
+  `agentPresets.mount(agentCtx, 'git-commit')` and the session header records
+  `agentPreset: git-commit`, exactly like DSH's webhook session creator.
+
+The composition is **empty by design**: the commit agent's capability set
+arrives from this plugin's host-plane installation (`agent/created` +
+`session-git-commit-` prefix + `restrict`/`guard`), so the preset must not
+declare `dsh-git-commit-agent` as a composition row — that would mount a second
+plugin instance inside the preset scope (a second service, shared store, races)
+and fail the registry's root-realm service-leak audit, marking the card broken.
+
+Registration waits for the registry through Cordis
+`ctx.inject(['agentPresets'], callback)`; patch row order does not guarantee
+service readiness. The dependency child owns unregistration, including teardown
+while the registration promise is pending. Minimal embedders without `inject`
+retain the one-shot lookup fallback. A successful registration logs
+`dsh-git-commit-agent: preset git-commit registered`.
+
+**Current limitation:** the roster entry has an empty composition. Selecting it
+for an ordinary session does not install the commit tools: tool installation
+still requires the dedicated session-id prefix. Do not treat this entry as a
+complete, independently usable default agent preset. A future composition entry
+must supply the tools and prompt by preset scope rather than by session id.
+
+## Prompt language preference
+
+Both session entry paths (the GitLens button and the host `startDedicatedSession`
+API) seed a prompt in one language, chosen from a single durable preference:
+
+- the plugin declares a **volatile settings field** `promptLanguage`
+  (`zh` | `en` | `follow-ui`) on its own profile entry — the locale-preference
+  template; the config-editing UI (and/or the planned preset-card configuration
+  button) writes it through `configForms` with no custom persistence;
+- `follow-ui` delegates to the active UI locale; a pinned value wins;
+- the host plane (no UI locale of its own, e.g. the business API) defaults to
+  `en`; the client plane falls back to its historical Chinese default only when
+  neither a preference nor a UI locale is available;
+- the language is resolved **at session admission** and frozen into the first
+  prompt; a settings change never rewrites a running session's text, and the
+  client UI strings, the approval copy and the prompt language remain three
+  independent text planes.
+
+Implementation: `src/config.ts` owns the shared resolver, `src/host/session.ts`
+builds both languages (default `en`), `client/client.js` mirrors the same rules.
+The field becomes editable in the UI once the host ships the preset-card action
+slot (see the DSH-side design report).
 
 ## Tools exposed to the dedicated agent
 

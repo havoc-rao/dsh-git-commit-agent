@@ -296,6 +296,8 @@ git.commit-plan.cancel
 | P2 批准与执行闭环 | 已完成 | `src/core/plan/digest.ts`、`executor.ts`、`lock.ts`、`src/core/store/store.ts`；测试 `tests/execute.test.ts` |
 | P3 进阶拆分 | 未开始（原计划） | — |
 | GitLens 入口 / DiffPane 计划预览 | **已实现**：`client/client.js`（手写 lazy-CJS）+ `dsh.client` 清单；真机 boot 已确认入口进入 `__DSH_BOOT__`、bundle 正常下发；浏览器内渲染尚未验证 | `docs/BETTER-SIDEBAR-INTEGRATION.md`、`docs/P0-VERIFICATION.md` §8.6-8.7 |
+| Agent preset 注册（`git-commit`） | **已实现**：`apply()` 内 `ctx.agentPresets.register({ id: 'git-commit', name, order: 30, plugins: [] })`（与声明式 `@deepseek-ai/dsh-agent-preset` 行同一 API）；专用会话 create/resume 的 `setup` 调 `agentPresets.mount(agentCtx, 'git-commit')`，会话头记录 `agentPreset: git-commit`。尚未真机验证（roster 卡片渲染、mount 绑定、默认切换） | `src/index.ts`（`COMMIT_AGENT_PRESET_ID`）、`src/host/types.ts`、`src/host/session.ts`；宿主 `packages/preset/agent-preset-registry` |
+| Prompt 语言偏好（zh/en/follow-ui） | **已实现（Host 数据层）**：volatile `Config.promptLanguage`（插件自带 schemastery 依赖，宿主 settings 按 `meta`/`dict`/`toJSON` 结构读取）；`src/config.ts` 共享解析规则；host/client 双语文案 builder；会话准入时冻结语言，不重写运行中会话。**未完成（UI 层）**：配置按钮/弹窗依赖宿主预设卡片动作槽位（DSH 侧实现中，见跨工作区联动） | `src/config.ts`、`src/host/session.ts`、`src/index.ts`、`client/client.js`；测试 `tests/prompt-language.test.ts` |
 | 真机宿主联调 | **已完成两轮**：第一轮发现 2 个阻断缺陷并修复；第二轮原样挂载（无 shim）复验通过，并发现并修复第 3 个（dataDir 忽略 `DSH_HOME`） | `docs/P0-VERIFICATION.md` §7、§7.1 |
 
 测试：`npm test` → 82/82 通过（`node --test`，真实隔离 git 仓库）。
@@ -325,6 +327,7 @@ git.commit-plan.cancel
 9. **审批改用宿主自带的 plan-review 原语**：原设计 §2.3 是"插件自绘的确认执行 N 次提交按钮"。客户端半边研究发现在 DSH 已有 `ctx.userQuestions.ask({... intent:{kind:'plan-review', approve}})`，且宿主自带渲染面板（`ui-user-questions/PlanReviewPanel`）。改为新增 `commit_agent_request_approval` 工具走该原语——**宿主所有、协议受控、展示内容即 digest 覆盖内容、零客户端代码**，比自绘按钮更符合"审批绑定内容且模型不可伪造"。业务 API 的 `approvePlan` 保留给程序化/集成入口。
 10. **工具可从调用会话的 cwd 兜底建任务**：原设计 §1.3 要求任务只由专用会话承载。在客户端入口（GitLens 按钮）落地前，工具会回退到调用会话在宿主 session store 里的权威 `cwd` 自动建任务，使功能在任何仓库会话中可用。专用会话路径仍是首选与 GitLens 入口的目标形态；worktree 始终由宿主会话记录决定，模型无法传路径。此偏差在客户端入口落地后应收紧为可配置项。
 11. **`approvedBy` 只是审计标签**：DSH 不提供进程内已认证用户身份，交互审批记为 `user:plan-review`（表示"经由宿主 plan-review 取得"），不宣称是可信身份授权。真正的控制仍是 digest 内容绑定。
+12. **预设组合为空 + 编程式注册**：预设 `git-commit` 的 `plugins` 刻意为空（能力集由宿主平面按前缀安装），**不**把本插件声明为组合行——那会在预设作用域里二次挂载插件（第二个 service、共享存储、竞态），且 `ctx.provide('gitCommitAgent')` 会命中 registry 的 root-realm 泄漏审计（`mount.ts leakedServices`），卡片直接 `broken`。注册走编程式 `register()` 而非 `cordis.patch.yml` 加 `@deepseek-ai/dsh-agent-preset` 行，避免声明与插件代码漂移；重复 id（HMR 二次挂载）容忍为"先前注册已拥有该条目"。会话绑定按 webhook 创建器模式（`setup` + `meta.agentPreset`），但挂载失败**不阻断**会话创建（best-effort 降级为未绑定，语义与无 registry 宿主一致）。
 
 ### 13.4 已知限制与后续步骤
 
@@ -335,6 +338,7 @@ git.commit-plan.cancel
   3. 启动路径**不用 `@Remote`**：`sessions.create({sessionId, cwd: worktree})` → `openSession` → `conversation.input.for(scope).setDraft(prompt)` + `submit()`，全部是公开客户端 API，因而完全绕开了"插件自带 cordis 与宿主 gateway symbols 是否互通"的未验证风险。
   工具注入按会话：客户端预分配 `session-git-commit-<uuid>` 的 `sessionId`，宿主半边在 `agent/created` 里只给该 agent scope 装 9 个工具 + `restrict({allow: []})` + 末端 `guard`；普通会话不再看到这些工具（宿主侧 `startDedicatedSession` 走同一条路径）。真正的控制不变：执行必须匹配宿主侧记录的、按 digest 绑定的审批。
 - **仍需真机浏览器验证**：模块表 fetch/materialize 握手、按钮在 GitLens 提交行的实际渲染、`submit()` 在刚创建会话上是否被接受（草稿已设置，用户可直接回车）、better-sidebar 对 proposed diff 的渲染。
+- **预设注册仍需真机验证**（2026-09-28 实现，尚未在带 `agent-preset-registry` 的宿主上跑过）：roster 卡片出现且不 `broken`（空组合挂载审计应通过）、`agentPresets.mount` 在 `setup` 中成功（webhook 模式）、会话 header 的 `agentPreset` 投影在会话头标签/新任务页 hero 芯片正确显示、设为默认后新会话行为符合预期。
 - better-sidebar 侧已交付分支 `feat/git-commit-action-seam` @ `edf6837`（本地未 push）：需要时由用户决定是否合并/发布。
 - P3：hunk 级分组、暂存区备份/重建、纯聊天审批协议。
 - Windows 换行/符号链接/权限位行为未验证。
