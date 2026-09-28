@@ -49,6 +49,23 @@ window.__ModuleLoader__.load({
      */
     const SESSION_ID_PREFIX = 'session-git-commit-'
 
+    /**
+     * The preset whose cards get this plugin's configuration action.
+     *
+     * The card-action slot renders every contribution on every preset card;
+     * the contributor decides whether a preset owns protocol-registered
+     * config. This plugin registers exactly one preset (`git-commit`), so only
+     * that card renders the button; every other card gets a null contribution
+     * (zero placeholder). Kept in sync by hand with the host half
+     * (`src/index.ts` `COMMIT_AGENT_PRESET_ID`); if a future preset shares the
+     * config surface, widen this to a Set/prefix without touching the slot
+     * contract — the slot itself stays preset-agnostic.
+     */
+    const CONFIGURED_PRESET_ID = 'git-commit'
+
+    /** Editable prompt-language values, in display order. */
+    const PROMPT_LANGUAGE_IDS = ['zh', 'en', 'follow-ui']
+
     const CSS = [
       '.dsh-gca-action{display:inline-flex;align-items:center;gap:6px}',
       '.dsh-gca-action button{display:inline-flex;align-items:center;gap:6px;padding:0 8px;height:24px;',
@@ -79,6 +96,86 @@ window.__ModuleLoader__.load({
       '.dsh-gca-files{margin:4px 0 2px;padding-left:16px;font-size:11px;line-height:1.6}',
       '.dsh-gca-card .dsh-gca-meta details>summary{cursor:pointer;font-size:11px}',
       '.dsh-gca-card .dsh-gca-meta details>div{margin-top:4px;font-size:10px;line-height:1.7;word-break:break-all}',
+      '.dsh-gca-configure{position:relative;appearance:none;border:0;border-radius:var(--dsw-radius-sm,4px);padding:6px;',
+      'background:none;color:var(--dsw-alias-label-tertiary,currentColor);cursor:pointer;display:inline-flex;',
+      'align-items:center}',
+      '.dsh-gca-configure:hover{background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.12));',
+      'color:var(--dsw-alias-label-primary,currentColor)}',
+      '.dsh-gca-configure:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,',
+      'var(--dsw-alias-state-business-primary,#0e639c));outline-offset:-1px}',
+      '.dsh-gca-configure::after{content:attr(data-tip);position:absolute;bottom:calc(100% + 6px);left:50%;',
+      'transform:translateX(-50%);padding:3px 8px;border-radius:var(--dsw-radius-sm,4px);',
+      'background:var(--dsw-alias-label-primary,currentColor);color:var(--dsw-alias-bg-layer-3,#1e1e1e);',
+      'font-size:11px;line-height:17px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s}',
+      '.dsh-gca-configure:hover::after,.dsh-gca-configure:focus-visible::after{opacity:1}',
+      '.dsh-gca-configure svg{display:block}',
+      '.dsh-gca-dialog-overlay{position:fixed;inset:0;z-index:1000;display:flex;align-items:center;',
+      'justify-content:center}',
+      '.dsh-gca-dialog-mask{position:absolute;inset:0;background:var(--dsw-alias-bg-mask-1,rgba(0,0,0,.45));',
+      'backdrop-filter:var(--dsw-mask-blur,blur(4px))}',
+      '.dsh-gca-dialog-panel{position:relative;z-index:1;width:420px;max-width:calc(100vw - 48px);',
+      'border-radius:var(--dsw-radius-panel,12px);background:var(--dsw-alias-bg-layer-2,#252526);',
+      'box-shadow:var(--dsw-elevation-prominent,0 8px 32px rgba(0,0,0,.5));font-size:12px;line-height:1.6}',
+      '.dsh-gca-dialog-panel:focus{outline:none}',
+      '.dsh-gca-dialog-header{display:flex;align-items:center;justify-content:space-between;gap:8px;',
+      'padding:12px 16px 10px;border-bottom:1px solid var(--dsw-alias-border-default,rgba(127,127,127,.25))}',
+      '.dsh-gca-dialog-header h4{margin:0;font-size:13px;font-weight:600}',
+      '.dsh-gca-dialog-close{appearance:none;border:0;background:none;color:var(--dsw-alias-label-tertiary,currentColor);',
+      'cursor:pointer;padding:4px;border-radius:var(--dsw-radius-sm,4px);display:inline-flex;',
+      'align-items:center;font-size:14px;line-height:1}',
+      '.dsh-gca-dialog-close:hover{background:var(--dsw-alias-bg-layer-1,rgba(127,127,127,.12));',
+      'color:var(--dsw-alias-label-primary,currentColor)}',
+      '.dsh-gca-dialog-close:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,',
+      'var(--dsw-alias-state-business-primary,#0e639c));outline-offset:-1px}',
+      '.dsh-gca-dialog-body{padding:14px 16px 16px}',
+      '.dsh-gca-dialog-label{display:block;margin:0 0 4px;opacity:.85}',
+      // Option control aligned with the settings switcher (PluginInventorySettingsTab
+      // `.switcher`): filled module surface, chevron edge, 36px row.
+      '.dsh-gca-dialog-select-wrap{position:relative;display:block}',
+      '.dsh-gca-dialog-select{display:flex;align-items:center;justify-content:space-between;width:100%;height:36px;',
+      'padding:0 14px;border:none;border-radius:var(--dsw-radius-md,6px);background:',
+      'var(--dsw-alias-bg-module-platform,#2d2d2d);color:var(--dsw-alias-label-primary,inherit);font:inherit;',
+      'font-size:14px;line-height:22px;cursor:pointer;appearance:none;-webkit-appearance:none;text-align:left}',
+      '.dsh-gca-dialog-select:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}',
+      '.dsh-gca-dialog-select:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,',
+      'var(--dsw-alias-state-business-primary,#0e639c));outline-offset:2px}',
+      '.dsh-gca-dialog-select-wrap .dsh-gca-chevron{position:absolute;right:14px;top:50%;transform:translateY(-50%);',
+      'pointer-events:none;color:var(--dsw-alias-label-primary,currentColor)}',
+      // Popup option card following the shared compact Menu surface
+      // (PopupSelectView `.card` + MenuSurface `.material`): translucent fill,
+      // prominent elevation, hover rows, trailing check on the selection.
+      '.dsh-gca-dialog-options{position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:100;padding:3px;',
+      'display:flex;flex-direction:column;border-radius:var(--dsw-radius-md,6px);background:',
+      'var(--dsw-menu-surface-fill,var(--dsw-alias-bg-layer-2,#2d2d2d));',
+      'backdrop-filter:var(--dsw-menu-backdrop-filter,blur(8px));box-shadow:var(--dsw-elevation-prominent,',
+      '0 8px 32px rgba(0,0,0,.5));outline:none;max-height:320px;overflow:auto}',
+      '.dsh-gca-dialog-option{display:flex;align-items:center;gap:6px;padding:5px 7px;border:none;background:transparent;',
+      'border-radius:var(--dsw-radius-md,6px);cursor:pointer;font-family:inherit;font-size:12px;text-align:left;',
+      'color:var(--dsw-alias-label-primary,inherit)}',
+      '.dsh-gca-dialog-option:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}',
+      '.dsh-gca-dialog-optionCheck{display:inline-flex;flex:none;margin-left:auto;',
+      'color:var(--dsw-alias-label-primary,currentColor)}',
+      '.dsh-gca-dialog-optionCheck svg{width:14px;height:14px}',
+      '.dsh-gca-dialog-hint{opacity:.7;font-size:11px;margin:6px 0 0}',
+      '.dsh-gca-dialog-ok{color:var(--dsw-alias-state-success,#4ec9b0);font-size:11px;margin:8px 0 0}',
+      '.dsh-gca-dialog-error{color:var(--dsw-alias-state-error,#f14c4c);font-size:11px;margin:8px 0 0}',
+      // Action row aligned with the settings editor footer (EditorFooter:
+      // secondary on the left, primary on the right, 36px rows).
+      '.dsh-gca-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}',
+      '.dsh-gca-dialog-actions button{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;',
+      'gap:4px;height:36px;padding:0 14px;border:none;border-radius:var(--dsw-radius-md,6px);font:inherit;',
+      'font-size:14px;line-height:22px;cursor:pointer}',
+      '.dsh-gca-dialog-actions button.dsh-gca-secondary{border:0.5px solid var(--dsw-alias-border-l3,',
+      'rgba(127,127,127,.3));background:transparent;color:var(--dsw-alias-label-primary,inherit)}',
+      '.dsh-gca-dialog-actions button.dsh-gca-secondary:hover:not(:disabled){',
+      'background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}',
+      '.dsh-gca-dialog-actions button.dsh-gca-primary{background:var(--dsw-alias-button-primary-fill,#0e639c);',
+      'color:var(--dsw-alias-label-primary-foreground,#fff)}',
+      '.dsh-gca-dialog-actions button.dsh-gca-primary:hover:not(:disabled){',
+      'background:var(--dsw-alias-button-primary-hover,#1177bb)}',
+      '.dsh-gca-dialog-actions button:disabled{opacity:.4;cursor:default}',
+      '.dsh-gca-dialog-actions button:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-focus-ring-color,',
+      'var(--dsw-alias-state-business-primary,#0e639c))}',
     ].join('')
 
     /** Inject the plugin stylesheet once, from inside the factory. */
@@ -93,26 +190,92 @@ window.__ModuleLoader__.load({
     }
 
     /** The prompt the button seeds into the new session. */
-    function buildPlanningPrompt(worktree, branch, stagedCount) {
-      const lines = [
-        '请为这个 worktree 规划提交。',
-        'worktree: ' + worktree,
-        'branch: ' + (branch || '(detached)'),
-        '',
-        '要求：',
-        '1. 先调用 commit_agent_inspect（默认 mode=status）读取真实状态与 changeId。changeId 是内容寻址的，文件一变就失效，必须重新读取；若状态显示已有暂存内容，所有 staged 变更必须进入第一个提交。',
-        '2. 用 commit_agent_diff / commit_agent_read_files 看真实改动，不要从路径或扩展名猜内容。',
-        '3. 用 commit_agent_prepare_plan 准备计划：每个待提交变更必须恰好出现一次；未纳入的必须放进 excludedChanges 并给出理由。',
-        '4. 计划没有 blocker 后调用 commit_agent_apply_plan：宿主会弹出审批面板让我批准；我批准之后才会真正执行提交。',
-        '5. 不要自己声称我已批准。若我拒绝，先问我怎么改，再准备新版本重新提交。',
-      ]
+    function buildPlanningPrompt(worktree, branch, stagedCount, language) {
+      const lines = language === 'en'
+        ? [
+            'Plan commits for this worktree.',
+            'worktree: ' + worktree,
+            'branch: ' + (branch || '(detached)'),
+            '',
+            'Requirements:',
+            '1. Start by calling commit_agent_inspect (mode=status is the default) to read the real state and changeIds.',
+            '   changeIds are content-addressed: they go stale the moment a file changes, so re-read before planning.',
+            '   If the status shows staged content, every staged change must be part of the first commit.',
+            '2. Read the real changes with commit_agent_diff / commit_agent_read_files; never guess contents from paths',
+            '   or extensions.',
+            '3. Prepare a plan with commit_agent_prepare_plan: every pending change appears exactly once; anything you',
+            '   leave out goes into excludedChanges with a reason.',
+            '4. Once the plan has no blockers, call commit_agent_apply_plan: the host shows an approval panel and asks',
+            '   me to approve; only after my approval will the commits actually run.',
+            '5. Never claim I approved anything by yourself. If I decline, ask me what to change, then prepare a new',
+            '   revision and submit again.',
+          ]
+        : [
+            '请为这个 worktree 规划提交。',
+            'worktree: ' + worktree,
+            'branch: ' + (branch || '(detached)'),
+            '',
+            '要求：',
+            '1. 先调用 commit_agent_inspect（默认 mode=status）读取真实状态与 changeId。changeId 是内容寻址的，文件一变就失效，必须重新读取；若状态显示已有暂存内容，所有 staged 变更必须进入第一个提交。',
+            '2. 用 commit_agent_diff / commit_agent_read_files 看真实改动，不要从路径或扩展名猜内容。',
+            '3. 用 commit_agent_prepare_plan 准备计划：每个待提交变更必须恰好出现一次；未纳入的必须放进 excludedChanges 并给出理由。',
+            '4. 计划没有 blocker 后调用 commit_agent_apply_plan：宿主会弹出审批面板让我批准；我批准之后才会真正执行提交。',
+            '5. 不要自己声称我已批准。若我拒绝，先问我怎么改，再准备新版本重新提交。',
+          ]
       if (stagedCount === 0) {
         lines.push(
           '',
-          '当前没有已暂存内容：工作区改动与未跟踪文件都要纳入提交计划，执行时由计划自行暂存后再提交，不要要求我先手动 git add。',
+          language === 'en'
+            ? 'There is nothing staged yet: include working-tree changes and untracked files in the plan; the '
+              + 'executor stages them as part of the plan itself, so do not ask me to run git add first.'
+            : '当前没有已暂存内容：工作区改动与未跟踪文件都要纳入提交计划，执行时由计划自行暂存后再提交，不要要求我先手动 git add。',
         )
       }
       return lines.join('\n')
+    }
+
+    /** Prompt-language preference field name; mirrors `src/config.ts`. */
+    const PROMPT_LANGUAGE_FIELD = 'promptLanguage'
+    /** Settings namespace = the plugin's profile entry id. */
+    const SETTINGS_NAMESPACE = 'dsh-git-commit-agent'
+
+    /**
+     * Resolve a stored preference against the active UI locale. Mirrors
+     * `src/config.ts` `resolvePromptLanguage`; the host builds its prompts
+     * through the same rule. When neither a preference nor a UI locale is
+     * available, the client keeps its historical default (Chinese).
+     */
+    function resolvePromptLanguage(preference, activeLocale) {
+      if (preference === 'zh') return 'zh'
+      if (preference === 'en') return 'en'
+      const locale = typeof activeLocale === 'string' ? activeLocale.toLowerCase() : ''
+      return locale.startsWith('zh') ? 'zh' : 'en'
+    }
+
+    /** The effective prompt language for a new session started from the client. */
+    function promptLanguageFor(ctx) {
+      const forms = service(ctx, 'configForms')
+      let preference
+      if (forms && typeof forms.get === 'function') {
+        try {
+          const form = forms.get(SETTINGS_NAMESPACE)
+          const snapshot = form && typeof form.getSnapshot === 'function' ? form.getSnapshot() : undefined
+          const value = snapshot && snapshot.status === 'ready' && snapshot.value && typeof snapshot.value === 'object'
+            ? snapshot.value
+            : undefined
+          if (value !== undefined) preference = value[PROMPT_LANGUAGE_FIELD]
+        } catch (error) {
+          // A broken forms surface must not block starting a session.
+          void error
+        }
+      }
+      const locale = service(ctx, 'locale')
+      let active = 'zh'
+      if (locale && typeof locale.getSnapshot === 'function') {
+        const snapshot = locale.getSnapshot()
+        if (snapshot && typeof snapshot.active === 'string' && snapshot.active !== '') active = snapshot.active
+      }
+      return resolvePromptLanguage(preference, active)
     }
 
     /** Resolve a host service, tolerating an absent one. */
@@ -223,7 +386,7 @@ window.__ModuleLoader__.load({
       if (conversation && conversation.input && actx !== undefined) {
         const input = conversation.input.for(actx)
         const stagedCount = Array.isArray(target.staged) ? target.staged.length : 0
-        input.setDraft(buildPlanningPrompt(worktree, target.branch, stagedCount))
+        input.setDraft(buildPlanningPrompt(worktree, target.branch, stagedCount, promptLanguageFor(ctx)))
         if (typeof input.submit === 'function') input.submit()
       }
       return sessionId
@@ -260,6 +423,285 @@ window.__ModuleLoader__.load({
       const scope = typeof sessionId === 'string' && sessionId !== '' ? { sessionId: sessionId } : undefined
       sidebar.openTab(seed, scope)
       return true
+    }
+
+    /** Locale namespace and copy for the preset-card configuration action. */
+    const CARD_ACTION_LOCALE = 'commitAgent.cardAction'
+    const CARD_ACTION_COPY = {
+      zh: {
+        label: '配置',
+        close: '关闭',
+        title: 'Git Commit Agent 配置',
+        promptLanguage: '提示词语言',
+        hint: '用于新创建的会话；已开始的会话保持创建时的语言。不改变界面语言。',
+        zh: '中文',
+        en: 'English',
+        followUi: '跟随界面语言',
+        save: '保存',
+        saved: '已保存',
+        failed: '保存失败，请重试',
+      },
+      en: {
+        label: 'Configure',
+        close: 'Close',
+        title: 'Git Commit Agent configuration',
+        promptLanguage: 'Prompt language',
+        hint: 'Applies to newly created sessions; running sessions keep their starting language. Does not change the UI language.',
+        zh: '中文',
+        en: 'English',
+        followUi: 'Follow UI language',
+        save: 'Save',
+        saved: 'Saved',
+        failed: 'Save failed, please retry',
+      },
+    }
+
+    /** Read the stored prompt-language value through the forms surface (see promptLanguageFor). */
+    function readPromptLanguageValue(ctx) {
+      const initial = promptLanguageFor(ctx)
+      const forms = service(ctx, 'configForms')
+      if (!forms || typeof forms.get !== 'function') return initial
+      try {
+        const form = forms.get(SETTINGS_NAMESPACE)
+        const snapshot = form && typeof form.getSnapshot === 'function' ? form.getSnapshot() : undefined
+        const value = snapshot && snapshot.status === 'ready' && snapshot.value && typeof snapshot.value === 'object'
+          ? snapshot.value
+          : undefined
+        if (value !== undefined && typeof value[PROMPT_LANGUAGE_FIELD] === 'string') {
+          return value[PROMPT_LANGUAGE_FIELD]
+        }
+      } catch (error) {
+        void error
+      }
+      return initial
+    }
+
+    /**
+     * Gear artwork for the configuration trigger, matching the DSH settings
+     * outline icon (16×16 viewBox, 1px stroke; path data from
+     * ui-primitives `IconSettingsOutlineArtwork`). The label rides `data-tip`
+     * on the button; the svg itself is decorative.
+     */
+    function GearIcon() {
+      return h('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true', strokeWidth: 1 },
+        h('path', { d: 'M8 9.75012C8.9665 9.75012 9.75 8.96662 9.75 8.00012C9.75 7.03362 8.9665 6.25012 8 6.25012C7.0335 6.25012 6.25 7.03362 6.25 8.00012C6.25 8.96662 7.0335 9.75012 8 9.75012Z', stroke: 'currentColor' }),
+        h('path', { d: 'M13.0107 7.79377C12.9505 7.89401 12.9205 7.94413 12.9205 7.99951C12.9205 8.0549 12.9505 8.10502 13.0106 8.20528L13.9849 9.83006C14.045 9.93029 14.0751 9.9804 14.0751 10.0358C14.0751 10.0911 14.045 10.1413 13.9849 10.2415L13.0037 11.8777C12.9468 11.9726 12.9184 12.0201 12.8725 12.0461C12.8267 12.072 12.7713 12.072 12.6607 12.072H10.6704C10.5598 12.072 10.5045 12.072 10.4586 12.098C10.4128 12.1239 10.3843 12.1714 10.3274 12.2662L9.33825 13.9142C9.28133 14.009 9.25287 14.0564 9.20703 14.0823C9.16118 14.1083 9.10588 14.1083 8.99529 14.1083H7.00486C6.89426 14.1083 6.83896 14.1083 6.79312 14.0823C6.74727 14.0564 6.71881 14.009 6.6619 13.9142L5.67273 12.2662C5.61581 12.1714 5.58735 12.1239 5.54151 12.098C5.49566 12.072 5.44036 12.072 5.32977 12.072H3.33945C3.2288 12.072 3.17347 12.072 3.12761 12.0461C3.08176 12.0201 3.0533 11.9726 2.9964 11.8777L2.0152 10.2415C1.9551 10.1413 1.92505 10.0911 1.92505 10.0358C1.92505 9.9804 1.9551 9.93029 2.0152 9.83006L2.98951 8.20528C3.04963 8.10502 3.07969 8.0549 3.07969 7.99951C3.07968 7.94413 3.04961 7.89401 2.98946 7.79377L2.01529 6.17011C1.95514 6.06987 1.92507 6.01975 1.92507 5.96437C1.92506 5.90899 1.95512 5.85886 2.01524 5.7586L2.9964 4.1224C3.0533 4.0275 3.08176 3.98005 3.12761 3.95408C3.17347 3.92811 3.2288 3.92811 3.33945 3.92811H5.32977C5.44036 3.92811 5.49566 3.92811 5.54151 3.90216C5.58735 3.87621 5.61581 3.82879 5.67273 3.73397L6.6619 2.08599C6.71881 1.99116 6.74727 1.94375 6.79312 1.9178C6.83896 1.89185 6.89426 1.89185 7.00486 1.89185H8.99529C9.10588 1.89185 9.16118 1.89185 9.20703 1.9178C9.25287 1.94375 9.28133 1.99116 9.33825 2.08599L10.3274 3.73397C10.3843 3.82879 10.4128 3.87621 10.4586 3.90216C10.5045 3.92811 10.5598 3.92811 10.6704 3.92811H12.6607C12.7713 3.92811 12.8267 3.92811 12.8725 3.95408C12.9184 3.98005 12.9468 4.0275 13.0037 4.1224L13.9849 5.7586C14.045 5.85886 14.0751 5.90899 14.0751 5.96437C14.0751 6.01975 14.045 6.06987 13.9849 6.17011L13.0107 7.79377Z', stroke: 'currentColor', strokeMiterlimit: 10 }),
+      )
+    }
+
+    /** Chevron artwork for the option control, matching the settings switcher
+     *  (ui-primitives `IconChevronDownOutline`, 16×16 viewBox, 1px stroke). */
+    function ChevronDownIcon() {
+      return h('svg', { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true', strokeWidth: 1, className: 'dsh-gca-chevron' },
+        h('path', { d: 'M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6', stroke: 'currentColor' }),
+      )
+    }
+
+    /** Check artwork marking the selected option (ui-primitives `IconCheckOutline`). */
+    function CheckIcon() {
+      return h('svg', { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true', strokeWidth: 1 },
+        h('path', { d: 'M2.25 8.5L5.49732 11.7473C5.90519 12.1552 6.57263 12.1344 6.95426 11.7018L13.75 4', stroke: 'currentColor' }),
+      )
+    }
+
+    /**
+     * Popup option card for one language choice, following the shared compact
+     * Menu surface (PopupSelectView `.card` + MenuSurface `.material`): rows
+     * hover, the current draft carries a trailing check, Escape dismisses.
+     */
+    function LanguageOptionsBox(props) {
+      const t = props.t
+      const onKeyDown = function (event) {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          event.stopPropagation()
+          props.onDismiss()
+        }
+      }
+      const rows = PROMPT_LANGUAGE_IDS.map(function (id) {
+        const selected = id === props.draft
+        return h('button', {
+          type: 'button',
+          key: id,
+          role: 'option',
+          'aria-selected': selected ? 'true' : 'false',
+          className: 'dsh-gca-dialog-option',
+          onClick: function () { props.onSelect(id) },
+        },
+          h('span', null, t(id)),
+          selected
+            ? h('span', { className: 'dsh-gca-dialog-optionCheck' }, h(CheckIcon))
+            : null,
+        )
+      })
+      return h('div', {
+        className: 'dsh-gca-dialog-options',
+        role: 'listbox',
+        'aria-label': t('promptLanguage'),
+        onKeyDown: onKeyDown,
+      }, rows)
+    }
+
+    /** Modal editing the prompt-language preference through configForms. */
+    function PromptLanguageDialog(props) {
+      const t = props.t
+      const [draft, setDraft] = React.useState(props.initialValue)
+      const [status, setStatus] = React.useState('idle') // idle | saving | saved | failed
+      const [optionsOpen, setOptionsOpen] = React.useState(false)
+      const wrapRef = React.useRef(null)
+      const onKeyDown = function (event) {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          event.stopPropagation()
+          props.onClose()
+        }
+      }
+      /** Dismiss the popup card and detach its outside-pointer listener. */
+      const dismissOptions = function () {
+        setOptionsOpen(false)
+        if (typeof document !== 'undefined' && typeof Node !== 'undefined') {
+          document.removeEventListener('pointerdown', onDocPointerDown, true)
+        }
+      }
+      /** Any pointer outside the option control closes the popup (PopupSelectView capture). */
+      const onDocPointerDown = function (event) {
+        if (wrapRef.current !== null && event.target instanceof Node && wrapRef.current.contains(event.target)) return
+        dismissOptions()
+      }
+      const toggleOptions = function () {
+        if (optionsOpen) {
+          dismissOptions()
+          return
+        }
+        setOptionsOpen(true)
+        if (typeof document !== 'undefined' && typeof Node !== 'undefined') {
+          document.addEventListener('pointerdown', onDocPointerDown, true)
+        }
+      }
+      const onSave = async function () {
+        setStatus('saving')
+        const forms = service(props.ctx, 'configForms')
+        let accepted = false
+        try {
+          const form = forms && typeof forms.get === 'function' ? forms.get(SETTINGS_NAMESPACE) : undefined
+          if (form && typeof form.set === 'function') {
+            accepted = await form.set(PROMPT_LANGUAGE_FIELD, draft)
+          }
+        } catch (error) {
+          void error
+        }
+        setStatus(accepted ? 'saved' : 'failed')
+      }
+      // Container/backdrop aligned with the DSH settings shell: fixed overlay,
+      // masked blur backdrop, elevated panel; close via Escape / mask / button.
+      return h('div', { className: 'dsh-gca-dialog-overlay', role: 'presentation' },
+        h('div', { className: 'dsh-gca-dialog-mask', 'aria-hidden': 'true', onClick: props.onClose }),
+        h('div', {
+          className: 'dsh-gca-dialog-panel',
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-label': t('title'),
+          onKeyDown: onKeyDown,
+        },
+          h('div', { className: 'dsh-gca-dialog-header' },
+            h('h4', null, t('title')),
+            h('button', {
+              type: 'button',
+              className: 'dsh-gca-dialog-close',
+              'aria-label': t('close'),
+              // Receive focus when the dialog opens, matching the settings panel.
+              autoFocus: true,
+              onClick: props.onClose,
+            }, '✕'),
+          ),
+          h('div', { className: 'dsh-gca-dialog-body' },
+            h('label', { className: 'dsh-gca-dialog-label' }, t('promptLanguage')),
+            h('div', { className: 'dsh-gca-dialog-select-wrap', ref: wrapRef },
+              h('button', {
+                type: 'button',
+                className: 'dsh-gca-dialog-select',
+                'aria-label': t('promptLanguage'),
+                'aria-haspopup': 'listbox',
+                'aria-expanded': optionsOpen ? 'true' : 'false',
+                onClick: toggleOptions,
+              }, h('span', null, t(draft))),
+              h(ChevronDownIcon),
+              optionsOpen
+                ? h(LanguageOptionsBox, {
+                    t: t,
+                    draft: draft,
+                    onSelect: function (id) {
+                      setDraft(id)
+                      setStatus('idle')
+                      dismissOptions()
+                    },
+                    onDismiss: dismissOptions,
+                  })
+                : null,
+            ),
+            h('p', { className: 'dsh-gca-dialog-hint' }, t('hint')),
+            status === 'saved'
+              ? h('p', { className: 'dsh-gca-dialog-ok' }, t('saved'))
+              : null,
+            status === 'failed'
+              ? h('p', { className: 'dsh-gca-dialog-error' }, t('failed'))
+              : null,
+            h('div', { className: 'dsh-gca-dialog-actions' },
+              h('button', { type: 'button', className: 'dsh-gca-secondary', onClick: props.onClose }, t('close')),
+              h('button', {
+                type: 'button',
+                className: 'dsh-gca-primary',
+                disabled: status === 'saving',
+                onClick: onSave,
+              }, t('save')),
+            ),
+          ),
+        ),
+      )
+    }
+
+    /** The preset-card configuration action contributed to the card-action slot. */
+    function CardConfigureAction(props) {
+      const t = props.t
+      const [open, setOpen] = React.useState(false)
+      const [initialValue, setInitialValue] = React.useState('follow-ui')
+      const triggerRef = React.useRef(null)
+      const closeDialog = function () {
+        setOpen(false)
+        // Return focus to the trigger once the dialog closes (settings
+        // panel behavior); a test renderer without DOM refs skips this.
+        if (triggerRef.current !== null && typeof triggerRef.current.focus === 'function') {
+          triggerRef.current.focus()
+        }
+      }
+      // Only presets that own protocol-registered config show the action. The
+      // slot contract renders a null contribution with zero placeholder, so
+      // every other card stays untouched (the host's read-only "查看配置"
+      // button is separate and unaffected).
+      if (props.presetId !== CONFIGURED_PRESET_ID) return null
+      // A `display: contents` div keeps the trigger and the dialog edge-free in
+      // the card footer while staying compatible with every React version.
+      return h('div', { className: 'dsh-gca-card-actions' },
+        h('button', {
+          type: 'button',
+          className: 'dsh-gca-configure',
+          'aria-label': t('label') + ': ' + String(props.presetId),
+          'data-tip': t('label'),
+          ref: triggerRef,
+          onClick: function () {
+            setInitialValue(readPromptLanguageValue(props.ctx))
+            setOpen(true)
+          },
+        }, h(GearIcon)),
+        open
+          ? h(PromptLanguageDialog, {
+              ctx: props.ctx,
+              t: t,
+              initialValue: initialValue,
+              onClose: closeDialog,
+            })
+          : null,
+      )
     }
 
     /** The GitLens commit-row button. */
@@ -705,11 +1147,44 @@ window.__ModuleLoader__.load({
           })
         })
       }
+
+      // Preset-card configuration action (host slot `settings.agentPreset.card.action`):
+      // owns its dictionary, idle when the host page has no such slot.
+      const localeSvc = service(ctx, 'locale')
+      if (localeSvc && typeof localeSvc.register === 'function') {
+        localeSvc.register(CARD_ACTION_LOCALE, { zh: CARD_ACTION_COPY.zh, en: CARD_ACTION_COPY.en })
+      }
+      if (ctx.slots && typeof ctx.slots.inject === 'function') {
+        ctx.slots.inject('settings.agentPreset.card.action', function* () {
+          yield ctx.slots.register({
+            name: 'settings.agentPreset.card.action',
+            id: 'dsh-git-commit-agent/card-configure',
+            order: 0,
+            locale: CARD_ACTION_LOCALE,
+          }, function (props) {
+            return h(CardConfigureAction, {
+              presetId: props.presetId,
+              t: props.t,
+              ctx: ctx,
+            })
+          })
+        })
+      }
     }
 
     // Internal hooks for the unit tests; the module table ignores them.
     exports.__test = {
       buildPlanningPrompt: buildPlanningPrompt,
+      resolvePromptLanguage: resolvePromptLanguage,
+      promptLanguageFor: promptLanguageFor,
+      readPromptLanguageValue: readPromptLanguageValue,
+      CardConfigureAction: CardConfigureAction,
+      PromptLanguageDialog: PromptLanguageDialog,
+      LanguageOptionsBox: LanguageOptionsBox,
+      CARD_ACTION_LOCALE: CARD_ACTION_LOCALE,
+      CARD_ACTION_COPY: CARD_ACTION_COPY,
+      CONFIGURED_PRESET_ID: CONFIGURED_PRESET_ID,
+      PROMPT_LANGUAGE_IDS: PROMPT_LANGUAGE_IDS,
       startPlanning: startPlanning,
       openPlanDiff: openPlanDiff,
       CommitAction: CommitAction,
