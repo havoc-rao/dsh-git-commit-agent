@@ -199,6 +199,46 @@ export interface HostUserQuestionService {
   }): Promise<{ readonly answers: ReadonlyArray<{ readonly id: string; readonly selected: string[]; readonly custom?: string }> }>
 }
 
+/** One child plugin row of a preset composition (`PresetDefinition['plugins']`, definition.ts:5-11). */
+export interface HostAgentPresetRow {
+  readonly id?: string
+  readonly name: string
+  readonly config?: unknown
+}
+
+/**
+ * `PresetDefinition` (`packages/preset/agent-preset-registry/src/definition.ts:5-11`).
+ *
+ * A preset declares an agent composition. The commit agent's composition is
+ * intentionally empty: its capability set arrives from this plugin's own
+ * `agent/created` + session-prefix installation, so declaring `plugins` rows
+ * here would double-mount the plugin (a second `CommitAgentService` in the
+ * preset scope) and fail the registry's root-realm leak audit
+ * (`mount.ts` `leakedServices`).
+ */
+export interface HostPresetDefinition {
+  readonly id: string
+  readonly name?: string
+  readonly description?: string
+  readonly order?: number
+  readonly plugins: readonly HostAgentPresetRow[]
+}
+
+/**
+ * `ctx.agentPresets` face (`packages/preset/agent-preset-registry/src/index.ts`).
+ *
+ * `register` eagerly activates the composition and returns a disposer the
+ * declaring plugin owns; a duplicate id rejects. `mount` binds an unpublished
+ * agent's scope to one preset revision so the session inherits that standing
+ * composition (the only production caller is the webhook session creator).
+ * Optional on the host: a host without the preset package has no registry, and
+ * registration plus binding degrade to today's unbound behavior.
+ */
+export interface HostAgentPresetRegistry {
+  register(definition: HostPresetDefinition): Promise<() => Promise<void>>
+  mount?(agentCtx: unknown, id?: string): Promise<{ readonly id: string }>
+}
+
 /** Minimal Cordis plugin context face. */
 export interface HostPluginContext {
   readonly tools: HostToolRegistry
@@ -209,6 +249,10 @@ export interface HostPluginContext {
    * uses it for `agents` so it still mounts on a host without an agent registry.
    */
   get?<T = unknown>(name: string): T | undefined
+  /** Dependency-owned child; reactivates when its required service becomes available. */
+  inject?(names: readonly string[], callback: (ctx: HostPluginContext) => void): unknown
+  readonly agentPresets?: HostAgentPresetRegistry
+  readonly settings?: HostSettingsForms
   readonly logger?: {
     info?(message: string, ...rest: unknown[]): void
     warn?(message: string, ...rest: unknown[]): void
@@ -217,6 +261,26 @@ export interface HostPluginContext {
   effect?(fn: () => (() => void) | void): unknown
   provide?(name: string, value?: unknown): unknown
   on?(event: string, listener: (...args: unknown[]) => void): () => void
+  /** The plugin instance's fiber; passed as the settings presentation owner. */
+  readonly fiber?: unknown
+}
+
+/** One settings descriptor row returned by `settings.describe()` (`SettingsDescriptor`). */
+export interface HostSettingsDescriptor {
+  readonly ns: string
+  /** Live value projected over the form schema (only volatile fields). */
+  readonly value: unknown
+}
+
+/**
+ * `ctx.settings` face (`packages/settings/settings/src/index.ts`). Only the
+ * members this plugin reads: `describe` for live volatile values (the read
+ * side of the prompt-language preference) and `configure` to opt out of
+ * auto-generated settings pages. Optional on the host.
+ */
+export interface HostSettingsForms {
+  describe?(options?: { readonly redactSecrets?: boolean }): readonly HostSettingsDescriptor[]
+  configure?(presentation: { readonly auto?: boolean }, owner?: unknown): (() => void) | undefined
 }
 
 /** A Cordis plugin module (`apply(ctx, config)`). */

@@ -12,7 +12,14 @@
  * in the verified DSH checkout.
  */
 import { randomUUID } from 'node:crypto'
+import z from '@deepseek-ai/schemastery'
 import { CommitAgentService, defaultDataDir } from './core/service.js'
+import {
+  COMMIT_AGENT_PROMPT_LANGUAGE_FIELD,
+  PROMPT_LANGUAGE_PATTERN,
+  resolvePromptLanguage,
+  type PromptLanguagePreference,
+} from './config.js'
 import type { PlanDraft } from './core/plan/validate.js'
 import type { ExecutionResult, PlanVersion, Snapshot } from './core/types.js'
 import { GitCommitError } from './core/errors.js'
@@ -31,19 +38,62 @@ import {
   requestInitialPlan,
   resumeDedicatedCommitSession,
   type DedicatedSession,
+  type DedicatedSetup,
   type UserMessageFactory,
 } from './host/session.js'
 import type {
   HostAgent,
+  HostAgentPresetRegistry,
   HostAgentRegistry,
   HostPluginContext,
+  HostScopedContext,
   HostSessionStore,
+  HostSettingsForms,
   HostUserQuestionService,
   HostWorkspaceRegistry,
 } from './host/types.js'
 
 /** Plugin name, matching the cordis row and package name. */
 export const name = 'dsh-git-commit-agent'
+
+/**
+ * Volatile settings schema for this plugin's profile entry (`git-commit-agent`).
+ *
+ * Following the locale preference template (`packages/client/locale`): only
+ * the `promptLanguage` field is editable live; everything else stays in the
+ * cordis row. The schema instance comes from this plugin's own schemastery
+ * dependency (same version as the host), and the host settings service reads
+ * it structurally (`meta`, `dict`, `toJSON`), so no host package import is
+ * needed on the plugin side.
+ */
+export const Config = z.object({
+  /** Prompt language applied to newly admitted sessions; `follow-ui` delegates to the UI locale. */
+  [COMMIT_AGENT_PROMPT_LANGUAGE_FIELD]: z.string().pattern(PROMPT_LANGUAGE_PATTERN).volatile(),
+})
+
+/** The settings field name; re-exported for the client half and tests. */
+export { COMMIT_AGENT_PROMPT_LANGUAGE_FIELD }
+
+/** Prompt-language resolution; re-exported so embedders and tests share one resolver. */
+export {
+  PROMPT_LANGUAGE_IDS,
+  PROMPT_LANGUAGE_PATTERN,
+  resolvePromptLanguage,
+  type PromptLanguagePreference,
+  type ResolvedPromptLanguage,
+} from './config.js'
+
+/**
+ * Agent-preset identity this plugin registers into the host's preset registry.
+ *
+ * The preset appears in the settings roster (AgentPresetSection) and is what
+ * dedicated sessions are bound to and recorded under (`meta.agentPreset`). Its
+ * composition is empty by design: the commit-agent capability set is installed
+ * by this plugin's `agent/created` + session-prefix path, and declaring the
+ * plugin as a composition row would double-mount it inside the preset scope and
+ * fail the registry's service-leak audit.
+ */
+export const COMMIT_AGENT_PRESET_ID = 'git-commit'
 
 /** Services required before mounting. */
 export const inject = ['tools']
@@ -141,6 +191,29 @@ export function createCommitAgentPlugin(
      * (or even present) at mount time.
      */
     readonly resolveAgents?: () => HostAgentRegistry | undefined
+    /**
+     * Lazy agent-preset lookup, resolved at call time like `resolveAgents`.
+     * When it yields a registry, dedicated sessions are bound to
+     * {@link COMMIT_AGENT_PRESET_ID} at create/resume time (`setup` +
+     * `agentPresets.mount`, the webhook session creator's pattern) and the
+     * session header records the preset. A missing registry or a failed mount
+     * degrades to today's unbound behavior — binding never fails session
+     * creation.
+     */
+    readonly resolveAgentPresets?: () => HostAgentPresetRegistry | undefined
+    /**
+     * Lazy settings lookup, resolved at call time like `resolveAgents`. When
+     * it yields a settings service, the prompt-language preference is read
+     * from this plugin's own namespace for each newly admitted session. A
+     * missing service degrades to the default language.
+     */
+    readonly resolveSettings?: () => HostSettingsForms | undefined
+    /**
+     * Where mount failures are reported. Absent on embedder-created plugins
+     * (binding then stays fully silent); `apply` passes `ctx.logger` so live
+     * hosts see the reason while session creation still proceeds unbound.
+     */
+    readonly logger?: { readonly warn?: (message: string, ...rest: unknown[]) => void }
     readonly newSessionId?: () => string
     readonly createUserMessage?: UserMessageFactory
     /**
@@ -170,6 +243,49 @@ export function createCommitAgentPlugin(
     }
     return agents
   }
+
+  /**
+   * Setup that binds a dedicated session to {@link COMMIT_AGENT_PRESET_ID},
+   * mirroring the webhook session creator (`webhook/src/session.ts:139-142`).
+   *
+   * Binding is metadata plus the standing composition; the five tools arrive
+   * through the `agent/created` listener regardless, so a missing registry or
+   * a failed mount must never fail session creation — the session then simply
+   * stays unbound, exactly like before this registration existed.
+   */
+  const bindAgentPreset = async (agentCtx: HostScopedContext): Promise<void> => {
+    const agentPresets = options.resolveAgentPresets?.()
+    if (agentPresets === undefined || typeof agentPresets.mount !== 'function') return
+    try {
+      await agentPresets.mount(agentCtx, COMMIT_AGENT_PRESET_ID)
+    } catch (error) {
+      options.logger?.warn?.(
+        `dsh-git-commit-agent: session stays without an agent preset: `
+        + (error instanceof Error ? error.message : String(error)),
+      )
+    }
+  }
+  const presetBindingSetup = (): DedicatedSetup | undefined => {
+    const agentPresets = options.resolveAgentPresets?.()
+    return agentPresets !== undefined && typeof agentPresets.mount === 'function' ? bindAgentPreset : undefined
+  }
+
+  /**
+   * Read the stored prompt-language preference from the plugin's own settings
+   * namespace. Hosts without the settings service report `undefined`, which
+   * resolves to the default language (`en` on the host plane, which has no UI
+   * locale to follow).
+   */
+  const readStoredPromptLanguage = (): PromptLanguagePreference | undefined => {
+    const settings = options.resolveSettings?.()
+    if (settings === undefined || typeof settings.describe !== 'function') return undefined
+    const row = settings.describe().find((entry) => entry.ns === name)
+    const value = row?.value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+    const field = (value as Record<string, unknown>)[COMMIT_AGENT_PROMPT_LANGUAGE_FIELD]
+    return typeof field === 'string' ? field as PromptLanguagePreference : undefined
+  }
+  const promptLanguage = (): 'zh' | 'en' => resolvePromptLanguage(readStoredPromptLanguage(), 'en')
 
   const api: GitCommitAgentApi = {
     toolNames: COMMIT_AGENT_TOOL_NAMES,
@@ -202,15 +318,19 @@ export function createCommitAgentPlugin(
       await service.init()
       // The five tools are installed by the `agent/created` listener in
       // `apply`, matched on the reserved session-id prefix that `newSessionId`
-      // mints. Nothing is installed here, so a session created by the plugin
-      // and one created by the GitLens button take the exact same path.
+      // mints. No tool is installed here — a session created by the plugin and
+      // one created by the GitLens button take the exact same tool path. The
+      // only thing added here is the preset binding (`setup` + header record);
+      // it is metadata, never the tool surface.
+      const setup = presetBindingSetup()
       const session = await createDedicatedCommitSession({
         agents,
         newSessionId,
         workspacePath: input.workspacePath,
         ...(options.agentOptions === undefined ? {} : { agentOptions: options.agentOptions }),
         ...(input.signal === undefined ? {} : { signal: input.signal }),
-      })
+        ...(setup === undefined ? {} : { agentPresetId: COMMIT_AGENT_PRESET_ID }),
+      }, ...(setup === undefined ? [] : [setup]))
       sessions.set(session.sessionId, session)
       // Group the session under the Workspace that owns its directory. The
       // sidebar groups by Workspace membership, not by cwd, so a session that is
@@ -233,7 +353,7 @@ export function createCommitAgentPlugin(
         snapshot: state.snapshot,
         indexEmpty: state.snapshot.indexEmpty,
         ...(input.userConstraints === undefined ? {} : { userConstraints: input.userConstraints }),
-      })
+      }, promptLanguage())
       await requestInitialPlan(
         session.handle,
         prompt,
@@ -244,12 +364,16 @@ export function createCommitAgentPlugin(
 
     async resumeDedicatedSession(resumeSessionId) {
       const agents = requireAgents()
-      const session = await resumeDedicatedCommitSession({ agents, resumeSessionId })
+      const setup = presetBindingSetup()
+      const session = await resumeDedicatedCommitSession(
+        { agents, resumeSessionId },
+        ...(setup === undefined ? [] : [setup]),
+      )
       sessions.set(session.sessionId, session)
       return session
     },
 
-    systemPrompt: () => buildCommitAgentSystemPrompt(),
+    systemPrompt: () => buildCommitAgentSystemPrompt(promptLanguage()),
   }
 
   return {
@@ -287,6 +411,9 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
   const plugin = createCommitAgentPlugin({
     ...options,
     resolveAgents: () => getService<HostAgentRegistry>('agents'),
+    resolveAgentPresets: () => getService<HostAgentPresetRegistry>('agentPresets'),
+    resolveSettings: () => getService<HostSettingsForms>('settings'),
+    logger: ctx.logger,
     /**
      * Attach a newly created dedicated session to the Workspace that owns its
      * directory. Without this the session has a cwd but no Workspace
@@ -410,6 +537,84 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
 
   if (typeof ctx.provide === 'function') ctx.provide('gitCommitAgent', plugin.api)
   ctx.logger?.info?.('dsh-git-commit-agent mounted')
+
+  /**
+   * Register this agent as a DSH agent preset, the standard way.
+   *
+   * The registry is the host's single roster: the settings page
+   * (`ui-agent-preset` AgentPresetSection) renders `agentPresets.list()`, so
+   * an entry here appears as a card that can be viewed and set as the default
+   * with zero client changes. Registration is the same call the declarative
+   * `@deepseek-ai/dsh-agent-preset` plugin wraps, just executed from the
+   * plugin's own mount so the definition cannot drift from this plugin's code.
+   *
+   * The composition is empty on purpose — see {@link HostPresetDefinition}.
+   * The registry is optional: a host without the preset package simply has no
+   * roster, and a duplicate id (a second mount of this plugin, HMR) means the
+   * earlier registration already owns the entry.
+   */
+  const registerPreset = (owner: HostPluginContext, agentPresets: HostAgentPresetRegistry): void => {
+    let retired = false
+    let unregister: (() => Promise<void>) | undefined
+    const release = (dispose: () => Promise<void>): void => {
+      void dispose().catch((error: unknown) => {
+        ctx.logger?.warn?.(`dsh-git-commit-agent: preset disposal failed: ${String(error)}`)
+      })
+    }
+    owner.effect?.(() => () => {
+      retired = true
+      if (unregister !== undefined) release(unregister)
+      unregister = undefined
+    })
+    void agentPresets
+      .register({
+        id: COMMIT_AGENT_PRESET_ID,
+        name: 'Git Commit Agent',
+        description:
+          'Dedicated Git commit planning and execution agent: analyses status and diff, materialises an exact '
+          + 'add/commit plan, binds your approval to one plan revision, and runs a restricted git executor.',
+        order: 30,
+        plugins: [],
+      })
+      .then((dispose) => {
+        if (retired) {
+          release(dispose)
+          return
+        }
+        unregister = dispose
+        ctx.logger?.info?.(`dsh-git-commit-agent: preset ${COMMIT_AGENT_PRESET_ID} registered`)
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error)
+        if (message.includes('Duplicate agent preset')) {
+          ctx.logger?.info?.(`dsh-git-commit-agent: preset ${COMMIT_AGENT_PRESET_ID} already registered`)
+        } else {
+          ctx.logger?.warn?.(`dsh-git-commit-agent: preset registration failed: ${message}`)
+        }
+      })
+  }
+
+  // Cordis activation is asynchronous: patch order is not service readiness.
+  // Let a dependency-owned child wait for the registry and own its registration.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['agentPresets'], (child) => {
+      const registry = child.agentPresets
+      if (registry === undefined) throw new Error('agentPresets injection resolved without its service')
+      registerPreset(child, registry)
+    })
+    // Following the locale template (`packages/client/locale`): opt this
+    // entry out of an auto-generated settings page while keeping its volatile
+    // fields editable through the forms/slots pipeline.
+    ctx.inject(['settings'], (child) => {
+      const declared = child.settings?.configure?.({ auto: false }, ctx.fiber)
+      if (declared !== undefined) child.effect?.(() => declared)
+    })
+  } else {
+    // Minimal embedders without Cordis injection retain one-shot compatibility.
+    const registry = getService<HostAgentPresetRegistry>('agentPresets')
+    if (registry !== undefined && typeof registry.register === 'function') registerPreset(ctx, registry)
+    else ctx.logger?.info?.('dsh-git-commit-agent: no agentPresets service; preset registration skipped')
+  }
 
   ctx.effect?.(() => () => {
     for (const dispose of installed.values()) dispose()
