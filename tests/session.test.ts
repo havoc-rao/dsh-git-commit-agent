@@ -8,7 +8,7 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { apply, createCommitAgentPlugin } from '../src/index.js'
+import { apply, COMMIT_AGENT_PRESET_ID, createCommitAgentPlugin } from '../src/index.js'
 import {
   fallbackUserMessage,
   requestInitialPlan,
@@ -267,6 +267,174 @@ test('the fallback user message carries every field the loop needs', () => {
   assert.deepEqual(message['source'], { kind: 'user' })
 })
 
+/** A fake agent registry that runs the host half of session creation. */
+function recordingAgents(overrides: {
+  create?: (options: { meta?: unknown; setup?: unknown }) => Promise<ReturnType<typeof fixedAgent>>
+  resume?: (options: { resumeSessionId: string; setup?: unknown }) => Promise<ReturnType<typeof fixedAgent>>
+}): HostAgentRegistry {
+  return {
+    async create(options: { meta?: unknown; setup?: unknown }) {
+      return await overrides.create?.(options) ?? {
+        agent: { id: '', session: { id: '' }, followup: () => undefined, whenIdle: async () => undefined },
+        dispose: async () => undefined,
+      }
+    },
+    async resume(options: { resumeSessionId: string; setup?: unknown }) {
+      return await overrides.resume?.(options) ?? {
+        agent: { id: '', session: { id: '' }, followup: () => undefined, whenIdle: async () => undefined },
+        dispose: async () => undefined,
+      }
+    },
+    get: () => undefined,
+  } as unknown as HostAgentRegistry
+}
+
+/** A session-capable host ctx: fake agents plus an optional preset registry. */
+function sessionHost(
+  registry: HostAgentRegistry,
+  agentPresets?: { mount: (scope: unknown, id?: string) => Promise<{ id: string }> },
+  settings?: { describe: () => Array<{ ns: string; value: unknown }> },
+): HostPluginContext {
+  return ctxWithThrowingAgents((name) => {
+    if (name === 'agents') return registry
+    if (name === 'agentPresets') return agentPresets
+    if (name === 'settings') return settings
+    return undefined
+  })
+}
+
+const fixedAgent = (id: string) => ({
+  agent: { id, session: { id }, followup: (_message?: unknown) => undefined, whenIdle: async () => undefined },
+  dispose: async () => undefined,
+})
+
+test('the dedicated session is bound to the git-commit preset and its header records it', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const mounts: Array<{ scope: unknown; id?: string }> = []
+    const captured: Array<{ meta?: unknown; setup?: unknown }> = []
+    const agentPresets = {
+      async mount(scope: unknown, id?: string) {
+        mounts.push({ scope, id })
+        return { id: id ?? COMMIT_AGENT_PRESET_ID }
+      },
+    }
+    const registry = recordingAgents({
+      async create(options) {
+        captured.push(options)
+        const scope = { tools: {} }
+        if (typeof options.setup === 'function') {
+          await (options.setup as (agentCtx: unknown) => void | Promise<void>)(scope)
+        }
+        return fixedAgent('session-git-commit-1')
+      },
+    })
+    const plugin = apply(sessionHost(registry, agentPresets), { dataDir: fixture.dataDir })
+    const started = await plugin.api.startDedicatedSession({
+      workspacePath: fixture.root,
+      sourceSessionId: 'session-source',
+    })
+    assert.match(started.sessionId, /^session-git-commit-[0-9a-f-]{36}$/)
+    const createOptions = captured[0]
+    assert.ok(createOptions)
+    // The host runs the supplied setup, which binds the agent scope to the
+    // registered preset — the webhook session creator's exact pattern.
+    assert.equal(typeof createOptions.setup, 'function')
+    assert.equal((createOptions.meta as { agentPreset?: string }).agentPreset, COMMIT_AGENT_PRESET_ID)
+    assert.equal(mounts.length, 1)
+    assert.deepEqual(mounts[0], { scope: { tools: {} }, id: COMMIT_AGENT_PRESET_ID })
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('a failed preset mount never fails session creation', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const agentPresets = {
+      async mount(): Promise<{ id: string }> {
+        throw new Error('agent-preset/not-found')
+      },
+    }
+    const registry = recordingAgents({
+      async create(options) {
+        if (typeof options.setup === 'function') {
+          await (options.setup as (agentCtx: unknown) => void | Promise<void>)({ tools: {} })
+        }
+        return fixedAgent('session-git-commit-2')
+      },
+    })
+    const plugin = apply(sessionHost(registry, agentPresets), { dataDir: fixture.dataDir })
+    // Binding is best-effort: the tools arrive through the `agent/created`
+    // listener regardless, so a mount failure leaves the session unbound but
+    // alive instead of aborting the button flow.
+    const started = await plugin.api.startDedicatedSession({
+      workspacePath: fixture.root,
+      sourceSessionId: null,
+    })
+    assert.match(started.sessionId, /^session-git-commit-[0-9a-f-]{36}$/)
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('resumeDedicatedSession re-binds the git-commit preset through its setup', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const mounts: Array<{ id?: string }> = []
+    const agentPresets = {
+      async mount(_scope: unknown, id?: string) {
+        mounts.push({ id })
+        return { id: id ?? COMMIT_AGENT_PRESET_ID }
+      },
+    }
+    const registry = recordingAgents({
+      async resume(options) {
+        if (typeof options.setup === 'function') {
+          await (options.setup as (agentCtx: unknown) => void | Promise<void>)({ tools: {} })
+        }
+        return fixedAgent('session-git-commit-9')
+      },
+    })
+    const plugin = apply(sessionHost(registry, agentPresets), { dataDir: fixture.dataDir })
+    const resumed = await plugin.api.resumeDedicatedSession('session-git-commit-9')
+    assert.equal(resumed.sessionId, 'session-git-commit-9')
+    assert.ok(mounts[0])
+    assert.deepEqual(mounts[0], { id: COMMIT_AGENT_PRESET_ID })
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('without an agentPresets service the session stays unbound (no setup, no header)', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const captured: Array<{ meta?: unknown; setup?: unknown }> = []
+    const registry = recordingAgents({
+      async create(options) {
+        captured.push(options)
+        return fixedAgent('session-git-commit-3')
+      },
+    })
+    const plugin = apply(sessionHost(registry), { dataDir: fixture.dataDir })
+    const started = await plugin.api.startDedicatedSession({
+      workspacePath: fixture.root,
+      sourceSessionId: null,
+    })
+    assert.match(started.sessionId, /^session-git-commit-[0-9a-f-]{36}$/)
+    const createOptions = captured[0]
+    assert.ok(createOptions)
+    assert.equal(createOptions.setup, undefined)
+    assert.equal((createOptions.meta as { agentPreset?: string }).agentPreset, undefined)
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
 test('the resolved factory falls back cleanly when the host package is unresolvable', async () => {
   resetUserMessageFactoryCache()
   const factory = await resolveUserMessageFactory()
@@ -275,4 +443,77 @@ test('the resolved factory falls back cleanly when the host package is unresolva
   assert.equal(message['source'] && (message['source'] as Record<string, unknown>)['kind'], 'user')
   assert.deepEqual(message['content'], [{ type: 'text', text: 'from fallback' }])
   resetUserMessageFactoryCache()
+})
+
+test('the stored prompt-language preference selects the language of the seeding prompt', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const texts: string[] = []
+    const registry = recordingAgents({
+      async create() {
+        return {
+          agent: {
+            id: 'session-git-commit-lang',
+            session: { id: 'session-git-commit-lang' },
+            followup: (message: unknown) => {
+              const content = (message as { content?: Array<{ text?: string }> }).content
+              texts.push(content?.[0]?.text ?? String(message))
+            },
+            whenIdle: async () => undefined,
+          },
+          dispose: async () => undefined,
+        }
+      },
+    })
+    const plugin = apply(sessionHost(registry, undefined, {
+      describe: () => [{ ns: 'dsh-git-commit-agent', value: { promptLanguage: 'zh' } }],
+    }), { dataDir: fixture.dataDir })
+    const started = await plugin.api.startDedicatedSession({
+      workspacePath: fixture.root,
+      sourceSessionId: null,
+    })
+    assert.match(started.sessionId, /^session-git-commit-[0-9a-f-]{36}$/)
+    assert.equal(texts.length, 1)
+    assert.ok(texts[0]?.includes('请为'), 'the seeding prompt should be Chinese when zh is stored')
+    assert.ok(texts[0]?.includes('commit_agent_inspect'))
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('without a stored preference the seeding prompt stays English on the host plane', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const texts: string[] = []
+    const registry = recordingAgents({
+      async create() {
+        return {
+          agent: {
+            id: 'session-git-commit-default',
+            session: { id: 'session-git-commit-default' },
+            followup: (message: unknown) => {
+              const content = (message as { content?: Array<{ text?: string }> }).content
+              texts.push(content?.[0]?.text ?? String(message))
+            },
+            whenIdle: async () => undefined,
+          },
+          dispose: async () => undefined,
+        }
+      },
+    })
+    // No settings service at all: the host plane has no UI locale to follow,
+    // so the default stays English (the pre-preference behavior).
+    const plugin = apply(sessionHost(registry), { dataDir: fixture.dataDir })
+    const started = await plugin.api.startDedicatedSession({
+      workspacePath: fixture.root,
+      sourceSessionId: null,
+    })
+    assert.match(started.sessionId, /^session-git-commit-[0-9a-f-]{36}$/)
+    assert.equal(texts.length, 1)
+    assert.ok(texts[0]?.includes('Plan commits'), 'the seeding prompt should default to English on the host plane')
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
 })

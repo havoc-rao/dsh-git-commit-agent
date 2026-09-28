@@ -46,6 +46,9 @@ function fakeReact(): Record<string, unknown> {
         value = next
       }]
     },
+    useRef(initial: unknown): { current: unknown } {
+      return { current: initial }
+    },
   }
 }
 
@@ -110,6 +113,17 @@ function findByType(node: unknown, type: string): Element | null {
   return found
 }
 
+/** First element whose `props.className` contains the given class. */
+function findByClassName(node: unknown, className: string): Element | null {
+  let found: Element | null = null
+  walk(node, (element) => {
+    if (found !== null) return
+    const classes = element.props['className']
+    if (typeof classes === 'string' && classes.split(/\s+/).includes(className)) found = element
+  })
+  return found
+}
+
 /**
  * Assert the button created exactly one commit session at the expected target.
  *
@@ -141,10 +155,14 @@ function fakeCtx(options: {
   workspaces?: Array<{ workspaceId: string; path: string }>
   /** Make `sessions.create({ workspaceId })` reject, like a vanished Workspace. */
   failWorkspaceCreate?: boolean
+  /** Fake `configForms` service (preset-card configuration dialog). */
+  configForms?: Record<string, unknown>
+  /** Fake `locale` service (UI language for prompt-language resolution). */
+  locale?: Record<string, unknown>
 } = {}): {
   ctx: Record<string, unknown>
   actions: Array<Record<string, unknown>>
-  toolviews: Array<{ key: string; component: (props: Record<string, unknown>) => unknown }>
+  toolviews: Array<{ key: string; options: Record<string, unknown>; component: (props: Record<string, unknown>) => unknown }>
   created: Array<Record<string, unknown>>
   opened: string[]
   drafts: string[]
@@ -153,7 +171,7 @@ function fakeCtx(options: {
   logged: string[]
 } {
   const actions: Array<Record<string, unknown>> = []
-  const toolviews: Array<{ key: string; component: (props: Record<string, unknown>) => unknown }> = []
+  const toolviews: Array<{ key: string; options: Record<string, unknown>; component: (props: Record<string, unknown>) => unknown }> = []
   const created: Array<Record<string, unknown>> = []
   const opened: string[] = []
   const drafts: string[] = []
@@ -212,6 +230,8 @@ function fakeCtx(options: {
         },
       },
     },
+    configForms: options.configForms,
+    locale: options.locale,
     betterSidebar: options.withSidebar === false ? undefined : sidebar,
   }
 
@@ -225,8 +245,8 @@ function fakeCtx(options: {
         for (const yielded of iterator) void yielded
         return () => undefined
       },
-      register(options_: { key: string }, component: (props: Record<string, unknown>) => unknown) {
-        toolviews.push({ key: options_.key, component })
+      register(options_: Record<string, unknown>, component: (props: Record<string, unknown>) => unknown) {
+        toolviews.push({ key: String(options_['key'] ?? ''), options: options_, component })
         return () => undefined
       },
     },
@@ -448,8 +468,9 @@ test('a missing sidebar degrades to tools-only without throwing', async () => {
   await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
   assert.equal(harness.actions.length, 0)
   assert.equal(harness.logged.length, 1)
-  // The transcript cards are still registered.
-  assert.deepEqual(harness.toolviews.map((t) => t.key).sort(), ['commit_agent_prepare_plan', 'commit_agent_apply_plan'].sort())
+  // The transcript cards and the preset-card action are still registered.
+  assert.deepEqual(harness.toolviews.map((t) => t.key).sort(), ['', 'commit_agent_prepare_plan', 'commit_agent_apply_plan'].sort())
+  assert.ok(harness.toolviews.some((t) => t.options['name'] === 'settings.agentPreset.card.action'))
 })
 
 test('an older sidebar without the feature flag is not used', async () => {
@@ -602,4 +623,216 @@ test('the apply card reflects the decision and the execution', async () => {
   assert.ok(executed.includes('execution completed'))
   assert.ok(executed.includes('1 个提交'))
   assert.ok(JSON.stringify(card.component({ block: { meta: { approved: false, planId: 'p', revision: 1 } } })).includes('未获批准'))
+})
+
+test('the client prompt builder emits zh and en from the fourth argument', async () => {
+  const { exports } = await loadBundle()
+  const build = (exports['__test'] as Record<string, unknown>)['buildPlanningPrompt'] as (w: string, b: string, s: number, l?: string) => string
+  const zh = build('/repo-wt', 'main', 0, 'zh')
+  assert.ok(zh.includes('请为这个 worktree 规划提交'))
+  assert.ok(zh.includes('当前没有已暂存内容'))
+  const en = build('/repo-wt', 'main', 0, 'en')
+  assert.ok(en.includes('Plan commits for this worktree.'))
+  assert.ok(en.includes('There is nothing staged yet'))
+  const zhStaged = build('/repo-wt', 'main', 2, 'zh')
+  assert.ok(!zhStaged.includes('当前没有已暂存内容'))
+  // Historical default: no language argument means Chinese (kept for the
+  // pre-preference behavior and plain embeds).
+  assert.equal(build('/repo-wt', 'main', 0), zh)
+})
+
+test('the client language resolver mirrors the host rule', async () => {
+  const { exports } = await loadBundle()
+  const resolve = (exports['__test'] as Record<string, unknown>)['resolvePromptLanguage'] as (p: unknown, l: string) => string
+  assert.equal(resolve('zh', 'en-US'), 'zh')
+  assert.equal(resolve('en', 'zh-CN'), 'en')
+  assert.equal(resolve('follow-ui', 'zh-CN'), 'zh')
+  assert.equal(resolve(undefined, 'en'), 'en')
+  assert.equal(resolve('fr', 'zh-CN'), 'zh')
+  assert.equal(resolve(null, 'zh'), 'zh')
+})
+
+test('the client reads the stored preference and falls back to the UI locale', async () => {
+  const { exports } = await loadBundle()
+  const read = (exports['__test'] as Record<string, unknown>)['promptLanguageFor'] as (ctx: unknown) => string
+  const services = {
+    configForms: {
+      get() {
+        return {
+          getSnapshot() {
+            return { status: 'ready', value: { promptLanguage: 'en' } }
+          },
+        }
+      },
+    },
+    locale: {
+      getSnapshot() {
+        return { active: 'zh-CN' }
+      },
+    },
+  }
+  const ctx = { get: (name: string) => services[name as keyof typeof services] }
+  // The stored preference wins over the UI locale.
+  assert.equal(read(ctx), 'en')
+  // No preference: follow the UI locale.
+  const formsService = services.configForms as { get: () => { getSnapshot(): { status: string; value: Record<string, unknown> } } }
+  formsService.get = () => ({
+    getSnapshot() {
+      return { status: 'ready', value: {} }
+    },
+  })
+  assert.equal(read(ctx), 'zh')
+  // No forms surface at all: the historical Chinese default.
+  const bare = { get: () => undefined }
+  assert.equal(read(bare), 'zh')
+})
+
+test('apply registers the preset-card configuration action into the card-action slot', async () => {
+  const { exports } = await loadBundle()
+  const harness = fakeCtx({ configForms: undefined, locale: undefined })
+  await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
+  const entry = harness.toolviews.find((t) => t.options['name'] === 'settings.agentPreset.card.action')
+  assert.ok(entry, 'a card-action slot registration should exist')
+  assert.equal(entry.options['id'], 'dsh-git-commit-agent/card-configure')
+  assert.equal(entry.options['locale'], 'commitAgent.cardAction')
+})
+
+test('the card action renders only for the configured preset and vanishes for every other card', async () => {
+  const { exports } = await loadBundle()
+  const entry = (exports['__test'] as Record<string, unknown>)['CardConfigureAction'] as (
+    props: Record<string, unknown>,
+  ) => unknown
+  const props = { close: () => undefined, t: (key: string) => key }
+  // Only the protocol-registered preset owns configuration: the action renders
+  // a gear trigger button for it.
+  const configured = entry({ ...props, presetId: 'git-commit' }) as { type: string }
+  assert.equal(configured.type, 'div')
+  const trigger = findByType(configured, 'button')
+  assert.ok(trigger)
+  // The trigger is an icon button carrying the gear artwork and a dictionary
+  // tooltip; the svg is decorative (aria-hidden).
+  assert.ok(findByType(configured, 'svg'), 'the trigger should contain a gear svg')
+  assert.equal(String(trigger.props['data-tip']), 'label')
+  const svg = findByType(configured, 'svg') as { props: Record<string, unknown> } | null
+  assert.equal(svg?.props['aria-hidden'], 'true')
+  // Every other card — built-ins and third-party presets alike — gets a null
+  // contribution: zero placeholder, no button, nothing in the footer.
+  for (const presetId of ['standard', 'ptc', 'minimal', 'cordis', 'someone-elses-preset']) {
+    assert.equal(entry({ ...props, presetId }), null, `${presetId} must not render the action`)
+  }
+})
+
+test('the card-action dialog renders with the settings-style shell and closes through every path', async () => {
+  const { exports } = await loadBundle()
+  const calls: Array<{ field: string; value: unknown }> = []
+  const forms = {
+    getSnapshot() {
+      return { status: 'ready', value: { promptLanguage: 'en' } }
+    },
+    async set(field: string, value: unknown) {
+      calls.push({ field, value })
+      return true
+    },
+  }
+  const harness = fakeCtx({ configForms: { get: () => forms } })
+  await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
+  const entry = harness.toolviews.find((t) => t.options['name'] === 'settings.agentPreset.card.action')
+  assert.ok(entry)
+
+  // The trigger button carries the preset id in its accessible label.
+  const t = (key: string): string => key
+  const tree = entry.component({ presetId: 'git-commit', close: () => undefined, t })
+  const button = findByType(tree, 'button')
+  assert.ok(button)
+  assert.equal(String(button.props['aria-label']), 'label: git-commit')
+
+  // The dialog uses the settings-shell structure: mask + elevated panel with a
+  // header and a dictionary-labeled close button.
+  const Dialog = (exports['__test'] as Record<string, unknown>)['PromptLanguageDialog'] as (props: Record<string, unknown>) => unknown
+  let closed = 0
+  const dialog = Dialog({ ctx: harness.ctx, t, initialValue: 'zh', onClose: () => { closed += 1 } })
+
+  const mask = findByClassName(dialog as never, 'dsh-gca-dialog-mask')
+  assert.ok(mask, 'a full-screen mask should exist')
+  assert.equal(mask.props['aria-hidden'], 'true')
+  const panel = findByClassName(dialog as never, 'dsh-gca-dialog-panel')
+  assert.ok(panel, 'an elevated panel should exist')
+  assert.equal(panel.props['role'], 'dialog')
+  assert.ok(findByClassName(dialog as never, 'dsh-gca-dialog-header'), 'a title row should exist')
+  const closeButton = findByClassName(dialog as never, 'dsh-gca-dialog-close')
+  assert.ok(closeButton)
+  assert.equal(String(closeButton.props['aria-label']), 'close')
+  assert.equal(closeButton.props['autoFocus'], true, 'the dialog should take focus on open')
+
+  // All three close paths: mask click, Escape on the panel, and the close button.
+  const escape = { key: 'Escape', preventDefault: () => undefined, stopPropagation: () => undefined }
+  const panelProps = panel.props as { onKeyDown?: (event: typeof escape) => void }
+  panelProps.onKeyDown?.(escape)
+  assert.equal(closed, 1, 'Escape should close the dialog')
+  ;(mask.props as { onClick?: () => void }).onClick?.()
+  assert.equal(closed, 2, 'a mask click should close the dialog')
+  ;(closeButton.props as { onClick?: () => void }).onClick?.()
+  assert.equal(closed, 3, 'the close button should close the dialog')
+
+  // The option control is a switcher-style trigger button announcing the
+  // popup card; the current draft is shown as its label.
+  const selectWrap = findByClassName(dialog as never, 'dsh-gca-dialog-select-wrap')
+  assert.ok(selectWrap, 'the option control should sit in a switcher-style wrapper')
+  const trigger = findByClassName(dialog as never, 'dsh-gca-dialog-select')
+  assert.ok(trigger, 'the option control should be a trigger button')
+  assert.equal(trigger.type, 'button')
+  assert.equal(String(trigger.props['aria-haspopup']), 'listbox')
+  assert.equal(String(trigger.props['aria-expanded']), 'false')
+  // The wrapper draws the switcher chevron (decorative) beside the trigger.
+  const chevron = findByClassName(dialog as never, 'dsh-gca-chevron')
+  assert.ok(chevron, 'a chevron svg should decorate the option control')
+  assert.equal(chevron.type, 'svg')
+  const buttons: Array<{ props: { onClick?: () => void; className?: string } }> = []
+  walk(dialog, (element) => {
+    if (element.type === 'button') buttons.push(element as never)
+  })
+  const secondary = buttons.find((b) => b.props.className === 'dsh-gca-secondary')
+  assert.ok(secondary, 'the dismiss button should carry the secondary style')
+  const save = buttons.find((b) => b.props.className === 'dsh-gca-primary')
+  assert.ok(save)
+  await (save.props.onClick as () => Promise<void>)()
+  assert.deepEqual(calls, [{ field: 'promptLanguage', value: 'zh' }])
+})
+
+test('the popup option card lists every language, marks the draft, picks on click, dismisses on Escape', async () => {
+  const { exports } = await loadBundle()
+  const Box = (exports['__test'] as Record<string, unknown>)['LanguageOptionsBox'] as (
+    props: Record<string, unknown>,
+  ) => unknown
+  const t = (key: string) => key
+  const picked: string[] = []
+  let dismissed = 0
+  const box = Box({ t, draft: 'en', onSelect: (id: string) => { picked.push(id) }, onDismiss: () => { dismissed += 1 } })
+
+  // The card is a listbox over the editable values; each row is an option.
+  const listbox = findByClassName(box as never, 'dsh-gca-dialog-options')
+  assert.ok(listbox, 'the popup card should exist')
+  assert.equal(listbox.props['role'], 'listbox')
+  const rows: Array<{ props: { role?: string; 'aria-selected'?: string; onClick?: () => void } }> = []
+  walk(box, (element) => {
+    if (String(element.props['className']).split(/\s+/).includes('dsh-gca-dialog-option')) rows.push(element as never)
+  })
+  assert.deepEqual(rows.map((r) => r.props['role']), ['option', 'option', 'option'])
+  // Only the current draft carries a trailing check.
+  const checks: Array<{ props: { className?: string } }> = []
+  walk(box, (element) => {
+    if (String(element.props['className']).split(/\s+/).includes('dsh-gca-dialog-optionCheck')) checks.push(element as never)
+  })
+  assert.equal(checks.length, 1, 'exactly the selected row should show the check')
+  assert.equal(rows[0]?.props['aria-selected'], 'false')
+  assert.equal(rows[1]?.props['aria-selected'], 'true', 'the draft row is selected')
+  assert.equal(rows[2]?.props['aria-selected'], 'false')
+
+  // Clicking a row picks it; Escape on the card dismisses without bubbling.
+  rows[0]?.props.onClick?.()
+  assert.deepEqual(picked, ['zh'])
+  const escape = { key: 'Escape', preventDefault: () => undefined, stopPropagation: () => undefined }
+  const boxProps = listbox.props as { onKeyDown?: (event: typeof escape) => void }
+  boxProps.onKeyDown?.(escape)
+  assert.equal(dismissed, 1, 'Escape should dismiss the popup card')
 })

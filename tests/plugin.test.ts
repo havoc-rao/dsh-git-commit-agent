@@ -9,13 +9,13 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { apply, createCommitAgentPlugin, inject, name } from '../src/index.js'
+import { apply, COMMIT_AGENT_PRESET_ID, createCommitAgentPlugin, inject, name } from '../src/index.js'
 import { COMMIT_AGENT_TOOL_NAMES } from '../src/host/tools.js'
-import type { HostPluginContext, HostToolDefinition } from '../src/host/types.js'
+import type { HostPluginContext, HostPresetDefinition, HostToolDefinition } from '../src/host/types.js'
 import { createInitialisedFixture, git, writeFile } from './helpers/fixture.js'
 
 /** A fake host context recording everything the plugin touches. */
-function fakeHost(): {
+function fakeHost(services: Record<string, unknown> = {}): {
   ctx: HostPluginContext
   /** The scope an `agent/created` payload can carry. */
   scope: { tools: unknown }
@@ -23,6 +23,8 @@ function fakeHost(): {
   disposed: string[]
   provided: Map<string, unknown>
   effects: number
+  warns: string[]
+  infos: string[]
   emit: (event: string, payload: unknown) => void
   runEffects: () => void
 } {
@@ -31,6 +33,8 @@ function fakeHost(): {
   const provided = new Map<string, unknown>()
   const effectFns: Array<() => void> = []
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
+  const warns: string[] = []
+  const infos: string[] = []
   const tools = {
     register(definition: HostToolDefinition) {
       registered.push(definition.name)
@@ -43,8 +47,11 @@ function fakeHost(): {
   }
   const ctx = {
     tools,
-    logger: { info: () => undefined, warn: () => undefined },
-    get: () => undefined,
+    logger: {
+      info: (message: string) => { infos.push(message) },
+      warn: (message: string) => { warns.push(message) },
+    },
+    get: (service: string) => services[service],
     provide(key: string, value: unknown) {
       provided.set(key, value)
     },
@@ -65,6 +72,8 @@ function fakeHost(): {
     registered,
     disposed,
     provided,
+    warns,
+    infos,
     get effects() {
       return effectFns.length
     },
@@ -117,6 +126,151 @@ test('apply() installs the tools per commit session, provides the API and wires 
   } finally {
     await fixture.cleanup()
   }
+})
+
+test('apply() registers the git-commit agent preset through the agentPresets service', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const registrations: Array<{ definition: HostPresetDefinition }> = []
+    const disposed: string[] = []
+    const agentPresets = {
+      async register(definition: HostPresetDefinition) {
+        registrations.push({ definition })
+        return async () => { disposed.push(definition.id) }
+      },
+    }
+    const host = fakeHost({ agentPresets })
+    const plugin = apply(host.ctx, { dataDir: fixture.dataDir })
+    await new Promise((resolve) => setImmediate(resolve))
+
+    // One registration, matching the standard `PresetDefinition` shape.
+    assert.equal(registrations.length, 1)
+    const definition = registrations[0]?.definition
+    assert.ok(definition)
+    assert.equal(definition.id, COMMIT_AGENT_PRESET_ID)
+    assert.equal(definition.name, 'Git Commit Agent')
+    assert.equal(definition.order, 30)
+    // The capability set arrives from this plugin's host-plane installation,
+    // never from composition rows (see `HostPresetDefinition`).
+    assert.deepEqual(definition.plugins, [])
+
+    // The disposer the registry returned is owned by the plugin's teardown.
+    host.runEffects()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(disposed, [COMMIT_AGENT_PRESET_ID])
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('apply() tolerates a duplicate preset registration (HMR / second mount)', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    let registerCalls = 0
+    const agentPresets = {
+      async register(): Promise<() => Promise<void>> {
+        registerCalls += 1
+        // The real registry rejects a duplicate id (`index.ts:83`); a plugin
+        // remounted (HMR) must survive that instead of failing its own apply.
+        throw new Error('Duplicate agent preset: git-commit')
+      },
+    }
+    const host = fakeHost({ agentPresets })
+    const first = apply(host.ctx, { dataDir: fixture.dataDir })
+    const second = apply(host.ctx, { dataDir: fixture.dataDir })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(registerCalls, 2)
+    assert.ok(host.infos.some((line) => line.includes('already registered')))
+    host.runEffects()
+    await first.dispose()
+    await second.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('apply() records an unexpected preset registration failure but keeps mounting', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const agentPresets = {
+      async register(): Promise<() => Promise<void>> {
+        throw new Error('boom')
+      },
+    }
+    const host = fakeHost({ agentPresets })
+    const plugin = apply(host.ctx, { dataDir: fixture.dataDir })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.ok(host.warns.some((line) => line.includes('preset registration failed: boom')))
+    // The plugin itself is unaffected: API still provided, unmount clean.
+    assert.ok(host.provided.has('gitCommitAgent'))
+    host.runEffects()
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('Cordis injection waits for a late registry and disposes late registration on child teardown', async () => {
+  const host = fakeHost()
+  const injected = new Map<string, (child: HostPluginContext) => void>()
+  let configureCalls = 0
+  const ctx: HostPluginContext = {
+    ...host.ctx,
+    inject(names, callback) {
+      // One dependency-owned child per required service; the settings child
+      // also owns the auto-page opt-out (`configure({ auto: false })`).
+      for (const serviceName of names as string[]) injected.set(serviceName, callback)
+    },
+  }
+  const plugin = apply(ctx)
+  assert.ok(injected.has('agentPresets'))
+  assert.ok(injected.has('settings'))
+  assert.ok(!host.infos.some(line => line.includes('registration skipped')))
+  let settle: ((dispose: () => Promise<void>) => void) | undefined
+  let cleanup: (() => void) | undefined
+  let released = 0
+  injected.get('agentPresets')?.({
+    ...host.ctx,
+    agentPresets: {
+      register(definition) {
+        assert.equal(definition.id, COMMIT_AGENT_PRESET_ID)
+        return new Promise(resolve => { settle = resolve })
+      },
+    },
+    effect(factory) { cleanup = factory() ?? undefined },
+  })
+  injected.get('settings')?.({
+    ...host.ctx,
+    settings: {
+      describe: () => [],
+      configure() {
+        configureCalls += 1
+        return () => undefined
+      },
+    },
+    effect(factory) {
+      const disposer = factory()
+      if (typeof disposer === 'function') disposer()
+    },
+  })
+  assert.equal(configureCalls, 1, 'the settings child should opt out of the auto-generated page')
+  assert.ok(cleanup)
+  assert.ok(settle)
+  cleanup()
+  settle(async () => { released++ })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(released, 1)
+  host.runEffects()
+  await plugin.dispose()
+})
+
+test('apply() skips preset registration when the host has no agentPresets service', () => {
+  const host = fakeHost()
+  const plugin = apply(host.ctx, { dataDir: '/tmp/dsh-gca-nopresets' })
+  assert.ok(host.infos.some((line) => line.includes('no agentPresets service')))
+  assert.equal(host.effects, 1)
+  void plugin
 })
 
 test('the business API drives a full approved commit without any agent registry', async () => {
