@@ -236,8 +236,14 @@ window.__ModuleLoader__.load({
 
     /** Prompt-language preference field name; mirrors `src/config.ts`. */
     const PROMPT_LANGUAGE_FIELD = 'promptLanguage'
-    /** Settings namespace = the plugin's profile entry id. */
-    const SETTINGS_NAMESPACE = 'dsh-git-commit-agent'
+    /**
+     * Settings namespace = the plugin's profile entry id (the cordis row `id`
+     * in `cordis.patch.yml`, NOT the module name): the host settings service
+     * addresses entries by `entry.options.id` and rejects any other key with
+     * "No configurable plugin entry". Kept in sync by hand with
+     * `cordis.patch.yml` and `src/index.ts` (`PROFILE_ENTRY_ID`).
+     */
+    const SETTINGS_NAMESPACE = 'git-commit-agent'
 
     /**
      * Resolve a stored preference against the active UI locale. Mirrors
@@ -1185,6 +1191,7 @@ window.__ModuleLoader__.load({
       CARD_ACTION_COPY: CARD_ACTION_COPY,
       CONFIGURED_PRESET_ID: CONFIGURED_PRESET_ID,
       PROMPT_LANGUAGE_IDS: PROMPT_LANGUAGE_IDS,
+      SETTINGS_NAMESPACE: SETTINGS_NAMESPACE,
       startPlanning: startPlanning,
       openPlanDiff: openPlanDiff,
       CommitAction: CommitAction,

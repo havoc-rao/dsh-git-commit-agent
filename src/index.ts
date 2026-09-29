@@ -71,6 +71,16 @@ export const Config = z.object({
   [COMMIT_AGENT_PROMPT_LANGUAGE_FIELD]: z.string().pattern(PROMPT_LANGUAGE_PATTERN).volatile(),
 })
 
+/**
+ * The settings namespace = the profile entry id (the cordis row `id` in
+ * `cordis.patch.yml`, NOT the module name). The host settings service finds an
+ * entry by `entry.options.id` and rejects every other key with
+ * "No configurable plugin entry", so this must match the patch row exactly.
+ * Kept in sync by hand with `cordis.patch.yml` and `client/client.js`
+ * (`SETTINGS_NAMESPACE`).
+ */
+export const PROFILE_ENTRY_ID = 'git-commit-agent'
+
 /** The settings field name; re-exported for the client half and tests. */
 export { COMMIT_AGENT_PROMPT_LANGUAGE_FIELD }
 
@@ -279,7 +289,7 @@ export function createCommitAgentPlugin(
   const readStoredPromptLanguage = (): PromptLanguagePreference | undefined => {
     const settings = options.resolveSettings?.()
     if (settings === undefined || typeof settings.describe !== 'function') return undefined
-    const row = settings.describe().find((entry) => entry.ns === name)
+    const row = settings.describe().find((entry) => entry.ns === PROFILE_ENTRY_ID)
     const value = row?.value
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
     const field = (value as Record<string, unknown>)[COMMIT_AGENT_PROMPT_LANGUAGE_FIELD]
