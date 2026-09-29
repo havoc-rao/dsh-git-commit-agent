@@ -699,7 +699,12 @@ test('apply registers the preset-card configuration action into the card-action 
 
 test('the card action renders only for the configured preset and vanishes for every other card', async () => {
   const { exports } = await loadBundle()
-  const entry = (exports['__test'] as Record<string, unknown>)['CardConfigureAction'] as (
+  const testHooks = exports['__test'] as Record<string, unknown>
+  // The settings namespace must be the cordis row id, not the module name:
+  // the host settings service rejects any other key ("No configurable plugin
+  // entry"), which surfaces to the user as a failed save.
+  assert.equal(testHooks['SETTINGS_NAMESPACE'], 'git-commit-agent')
+  const entry = testHooks['CardConfigureAction'] as (
     props: Record<string, unknown>,
   ) => unknown
   const props = { close: () => undefined, t: (key: string) => key }

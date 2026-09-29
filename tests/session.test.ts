@@ -466,7 +466,9 @@ test('the stored prompt-language preference selects the language of the seeding 
       },
     })
     const plugin = apply(sessionHost(registry, undefined, {
-      describe: () => [{ ns: 'dsh-git-commit-agent', value: { promptLanguage: 'zh' } }],
+      // The settings namespace is the cordis row id (`git-commit-agent`), not
+      // the module name: the host settings service rejects any other key.
+      describe: () => [{ ns: 'git-commit-agent', value: { promptLanguage: 'zh' } }],
     }), { dataDir: fixture.dataDir })
     const started = await plugin.api.startDedicatedSession({
       workspacePath: fixture.root,
@@ -512,6 +514,45 @@ test('without a stored preference the seeding prompt stays English on the host p
     assert.match(started.sessionId, /^session-git-commit-[0-9a-f-]{36}$/)
     assert.equal(texts.length, 1)
     assert.ok(texts[0]?.includes('Plan commits'), 'the seeding prompt should default to English on the host plane')
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('a settings row under the module name is ignored: only the entry id namespace counts', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const texts: string[] = []
+    const registry = recordingAgents({
+      async create() {
+        return {
+          agent: {
+            id: 'session-git-commit-ns',
+            session: { id: 'session-git-commit-ns' },
+            followup: (message: unknown) => {
+              const content = (message as { content?: Array<{ text?: string }> }).content
+              texts.push(content?.[0]?.text ?? String(message))
+            },
+            whenIdle: async () => undefined,
+          },
+          dispose: async () => undefined,
+        }
+      },
+    })
+    // The host settings service addresses entries by the cordis row id
+    // (`git-commit-agent`); a row described under the module name would never
+    // match and the preference must not leak through.
+    const plugin = apply(sessionHost(registry, undefined, {
+      describe: () => [{ ns: 'dsh-git-commit-agent', value: { promptLanguage: 'zh' } }],
+    }), { dataDir: fixture.dataDir })
+    const started = await plugin.api.startDedicatedSession({
+      workspacePath: fixture.root,
+      sourceSessionId: null,
+    })
+    assert.match(started.sessionId, /^session-git-commit-[0-9a-f-]{36}$/)
+    assert.equal(texts.length, 1)
+    assert.ok(texts[0]?.includes('Plan commits'), 'a mismatched namespace must fall back to the default language')
     await plugin.dispose()
   } finally {
     await fixture.cleanup()

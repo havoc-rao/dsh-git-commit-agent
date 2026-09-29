@@ -9,7 +9,14 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { apply, COMMIT_AGENT_PRESET_ID, createCommitAgentPlugin, inject, name } from '../src/index.js'
+import {
+  apply,
+  COMMIT_AGENT_PRESET_ID,
+  createCommitAgentPlugin,
+  inject,
+  name,
+  PROFILE_ENTRY_ID,
+} from '../src/index.js'
 import { COMMIT_AGENT_TOOL_NAMES } from '../src/host/tools.js'
 import type { HostPluginContext, HostPresetDefinition, HostToolDefinition } from '../src/host/types.js'
 import { createInitialisedFixture, git, writeFile } from './helpers/fixture.js'
@@ -90,6 +97,10 @@ test('the package entry exposes the Cordis plugin shape', () => {
   assert.equal(name, 'dsh-git-commit-agent')
   assert.deepEqual(inject, ['tools'])
   assert.equal(typeof apply, 'function')
+  // The settings namespace is the cordis row id, not the module name: the
+  // host settings service rejects every other key, which breaks preference
+  // writes (user-visible failed save) and reads alike.
+  assert.equal(PROFILE_ENTRY_ID, 'git-commit-agent')
 })
 
 test('apply() installs the tools per commit session, provides the API and wires the disposer', async () => {
