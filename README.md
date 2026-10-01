@@ -114,8 +114,8 @@ API) seed a prompt in one language, chosen from a single durable preference:
 
 - the plugin declares a **volatile settings field** `promptLanguage`
   (`zh` | `en` | `follow-ui`) on its own profile entry — the locale-preference
-  template; the config-editing UI (and/or the planned preset-card configuration
-  button) writes it through `configForms` with no custom persistence;
+  template; the preset-card Configure button writes it through `configForms`
+  with no custom persistence;
 - `follow-ui` delegates to the active UI locale; a pinned value wins;
 - the host plane (no UI locale of its own, e.g. the business API) defaults to
   `en`; the client plane falls back to its historical Chinese default only when
@@ -124,11 +124,49 @@ API) seed a prompt in one language, chosen from a single durable preference:
   prompt; a settings change never rewrites a running session's text, and the
   client UI strings, the approval copy and the prompt language remain three
   independent text planes.
+- the prompt itself is not the whole story: both the system prompt and the
+  first user message **require the agent to drive the entire workflow through
+  the five tools** (never guessing state or describing a plan without
+  `commit_agent_prepare_plan`) and **require every user-facing message —
+  analysis, plan explanation, suggested commit messages and progress reports —
+  to be presented in the prompt's language** (中文 for `zh`, English for `en`),
+  so the session reads fluently in the chosen language even though the third
+  planes (button labels, approval copy) keep their own translations.
 
 Implementation: `src/config.ts` owns the shared resolver, `src/host/session.ts`
 builds both languages (default `en`), `client/client.js` mirrors the same rules.
-The field becomes editable in the UI once the host ships the preset-card action
-slot (see the DSH-side design report).
+Both fields become editable through the preset-card Configure button
+(`settings.agentPreset.card.action` slot).
+
+## Default LLM model preference
+
+Both session entry paths (the GitLens button and the host `startDedicatedSession`
+API) can pin which LLM model the dedicated session runs on, chosen from the
+host's **model list** (the same provider-grouped catalog the settings models
+page renders):
+
+- the plugin declares a **volatile settings field** `defaultModel`
+  (`{ provider, model }`) on its own profile entry; the preset-card Configure
+  dialog renders a picker populated from `remote.session.modelCatalog()` and
+  writes the exact route through `configForms`;
+- **no default model is a valid preference**: the picker's first option is
+  "follow the host default (not specified)", which clears the field — the
+  deployment `agentOptions` row or the host default model then applies;
+- precedence at session admission: stored `defaultModel` (user's explicit
+  choice, from the Configure dialog) → deployment `agentOptions` row → host
+  default. The stored route overrides only the row's provider/model; other row
+  options (`reasoningEffort`, `maxTokens`) are preserved;
+- the button path applies the stored route right after session creation
+  through `remote.session.selectModel` — the same durable per-session
+  selection the composer model seat installs — so the first prompt's request
+  header is built with it; the host API path passes it as `agentOptions`;
+- a missing remote surface or a route that vanished from the catalog degrades
+  silently to the host default: model pinning never blocks starting a session.
+
+Implementation: the schema field and the admission-time resolution live in
+`src/index.ts` (`COMMIT_AGENT_DEFAULT_MODEL_FIELD`, `resolveAgentOptions`),
+`src/config.ts` owns the tolerant validator, and `client/client.js` owns the
+catalog picker and the `selectModel` application.
 
 ## Tools exposed to the dedicated agent
 
