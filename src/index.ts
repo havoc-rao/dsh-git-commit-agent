@@ -15,9 +15,12 @@ import { randomUUID } from 'node:crypto'
 import z from '@deepseek-ai/schemastery'
 import { CommitAgentService, defaultDataDir } from './core/service.js'
 import {
+  COMMIT_AGENT_DEFAULT_MODEL_FIELD,
   COMMIT_AGENT_PROMPT_LANGUAGE_FIELD,
   PROMPT_LANGUAGE_PATTERN,
+  isDefaultModelPreference,
   resolvePromptLanguage,
+  type DefaultModelPreference,
   type PromptLanguagePreference,
 } from './config.js'
 import type { PlanDraft } from './core/plan/validate.js'
@@ -60,8 +63,8 @@ export const name = 'dsh-git-commit-agent'
  * Volatile settings schema for this plugin's profile entry (`git-commit-agent`).
  *
  * Following the locale preference template (`packages/client/locale`): only
- * the `promptLanguage` field is editable live; everything else stays in the
- * cordis row. The schema instance comes from this plugin's own schemastery
+ * the volatile fields are editable live; everything else stays in the cordis
+ * row. The schema instance comes from this plugin's own schemastery
  * dependency (same version as the host), and the host settings service reads
  * it structurally (`meta`, `dict`, `toJSON`), so no host package import is
  * needed on the plugin side.
@@ -69,6 +72,16 @@ export const name = 'dsh-git-commit-agent'
 export const Config = z.object({
   /** Prompt language applied to newly admitted sessions; `follow-ui` delegates to the UI locale. */
   [COMMIT_AGENT_PROMPT_LANGUAGE_FIELD]: z.string().pattern(PROMPT_LANGUAGE_PATTERN).volatile(),
+  /**
+   * Default LLM route (provider/model from the model catalog) applied to newly
+   * created dedicated sessions. Optional on purpose: when the field is absent
+   * the deployment `agentOptions` row applies, and when that is absent too the
+   * host default model is used.
+   */
+  [COMMIT_AGENT_DEFAULT_MODEL_FIELD]: z.object({
+    provider: z.string(),
+    model: z.string(),
+  }).volatile(),
 })
 
 /**
@@ -82,7 +95,7 @@ export const Config = z.object({
 export const PROFILE_ENTRY_ID = 'git-commit-agent'
 
 /** The settings field name; re-exported for the client half and tests. */
-export { COMMIT_AGENT_PROMPT_LANGUAGE_FIELD }
+export { COMMIT_AGENT_DEFAULT_MODEL_FIELD, COMMIT_AGENT_PROMPT_LANGUAGE_FIELD }
 
 /** Prompt-language resolution; re-exported so embedders and tests share one resolver. */
 export {
@@ -91,6 +104,12 @@ export {
   resolvePromptLanguage,
   type PromptLanguagePreference,
   type ResolvedPromptLanguage,
+} from './config.js'
+
+/** Default-model preference; re-exported so embedders and tests share one validator. */
+export {
+  isDefaultModelPreference,
+  type DefaultModelPreference,
 } from './config.js'
 
 /**
@@ -114,7 +133,9 @@ export interface CommitAgentConfig {
   readonly dataDir?: string
   /** Lock directory; `null` disables the on-disk lock (in-process lock still applies). */
   readonly lockDir?: string | null
-  /** Model options for the dedicated session. */
+  /** Model options for the dedicated session. A stored settings preference
+   * (`defaultModel`) overrides the model/provider here when both exist; the
+   * other options still apply. */
   readonly agentOptions?: {
     readonly provider?: string
     readonly model?: string
@@ -297,6 +318,38 @@ export function createCommitAgentPlugin(
   }
   const promptLanguage = (): 'zh' | 'en' => resolvePromptLanguage(readStoredPromptLanguage(), 'en')
 
+  /**
+   * Read the stored default-model preference from the plugin's own settings
+   * namespace, with the same entry-id addressing as
+   * {@link readStoredPromptLanguage}. Hosts without the settings service (or
+   * with a malformed stored value) report no default.
+   */
+  const readStoredDefaultModel = (): DefaultModelPreference | undefined => {
+    const settings = options.resolveSettings?.()
+    if (settings === undefined || typeof settings.describe !== 'function') return undefined
+    const row = settings.describe().find((entry) => entry.ns === PROFILE_ENTRY_ID)
+    const value = row?.value
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+    const field = (value as Record<string, unknown>)[COMMIT_AGENT_DEFAULT_MODEL_FIELD]
+    return isDefaultModelPreference(field) ? field : undefined
+  }
+
+  /**
+   * Model route for a dedicated session, in precedence order:
+   *
+   * 1. the **stored settings preference** (the user's explicit choice in the
+   *    preset-card configure surface) — it overrides the deployment row;
+   * 2. the deployment `agentOptions` row (other fields such as
+   *    `reasoningEffort` / `maxTokens` are preserved), when no preference is
+   *    stored;
+   * 3. nothing — the host default model applies.
+   */
+  const resolveAgentOptions = (): CommitAgentConfig['agentOptions'] | undefined => {
+    const stored = readStoredDefaultModel()
+    if (stored === undefined) return options.agentOptions
+    return { ...options.agentOptions, provider: stored.provider, model: stored.model }
+  }
+
   const api: GitCommitAgentApi = {
     toolNames: COMMIT_AGENT_TOOL_NAMES,
 
@@ -333,11 +386,15 @@ export function createCommitAgentPlugin(
       // only thing added here is the preset binding (`setup` + header record);
       // it is metadata, never the tool surface.
       const setup = presetBindingSetup()
+      // The stored default-model preference wins over the deployment row; an
+      // absent preference delegates to the row, and an absent row leaves the
+      // host default untouched (`resolveAgentOptions`).
+      const agentOptions = resolveAgentOptions()
       const session = await createDedicatedCommitSession({
         agents,
         newSessionId,
         workspacePath: input.workspacePath,
-        ...(options.agentOptions === undefined ? {} : { agentOptions: options.agentOptions }),
+        ...(agentOptions === undefined ? {} : { agentOptions }),
         ...(input.signal === undefined ? {} : { signal: input.signal }),
         ...(setup === undefined ? {} : { agentPresetId: COMMIT_AGENT_PRESET_ID }),
       }, ...(setup === undefined ? [] : [setup]))

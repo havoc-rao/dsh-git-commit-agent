@@ -153,6 +153,9 @@ window.__ModuleLoader__.load({
       'border-radius:var(--dsw-radius-md,6px);cursor:pointer;font-family:inherit;font-size:12px;text-align:left;',
       'color:var(--dsw-alias-label-primary,inherit)}',
       '.dsh-gca-dialog-option:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}',
+      '.dsh-gca-dialog-group{flex:none;padding:6px 7px 2px;font-size:11px;font-weight:600;opacity:.75}',
+      '.dsh-gca-dialog-modelText{display:flex;flex-direction:column;gap:1px;min-width:0}',
+      '.dsh-gca-dialog-modelRoute{opacity:.65;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.dsh-gca-dialog-optionCheck{display:inline-flex;flex:none;margin-left:auto;',
       'color:var(--dsw-alias-label-primary,currentColor)}',
       '.dsh-gca-dialog-optionCheck svg{width:14px;height:14px}',
@@ -209,6 +212,8 @@ window.__ModuleLoader__.load({
             '   me to approve; only after my approval will the commits actually run.',
             '5. Never claim I approved anything by yourself. If I decline, ask me what to change, then prepare a new',
             '   revision and submit again.',
+            '6. Use the tools for every step — never sketch state or a plan from memory. Present everything you show',
+            '   me — analysis, plan explanation, suggested commit messages, progress reports — in English.',
           ]
         : [
             '请为这个 worktree 规划提交。',
@@ -221,6 +226,7 @@ window.__ModuleLoader__.load({
             '3. 用 commit_agent_prepare_plan 准备计划：每个待提交变更必须恰好出现一次；未纳入的必须放进 excludedChanges 并给出理由。',
             '4. 计划没有 blocker 后调用 commit_agent_apply_plan：宿主会弹出审批面板让我批准；我批准之后才会真正执行提交。',
             '5. 不要自己声称我已批准。若我拒绝，先问我怎么改，再准备新版本重新提交。',
+            '6. 每一步都必须使用工具，不要凭记忆描述状态或计划。所有展示给我的内容——分析、计划说明、建议的提交信息、进度汇报——都必须使用中文。',
           ]
       if (stagedCount === 0) {
         lines.push(
@@ -236,6 +242,8 @@ window.__ModuleLoader__.load({
 
     /** Prompt-language preference field name; mirrors `src/config.ts`. */
     const PROMPT_LANGUAGE_FIELD = 'promptLanguage'
+    /** Default-model preference field name; mirrors `src/config.ts`. */
+    const DEFAULT_MODEL_FIELD = 'defaultModel'
     /**
      * Settings namespace = the plugin's profile entry id (the cordis row `id`
      * in `cordis.patch.yml`, NOT the module name): the host settings service
@@ -383,6 +391,11 @@ window.__ModuleLoader__.load({
         }
       }
       if (typeof sessionId !== 'string' || sessionId === '') sessionId = requestedId
+      // Pin the stored default model before the first prompt is submitted, so
+      // the request header is built with it (the composer model seat's exact
+      // selection path). Best-effort: a missing remote or a stale route keeps
+      // the host default.
+      await applyStoredDefaultModel(ctx, sessionId)
       const workspace = service(ctx, 'uiWorkspace')
       if (workspace && typeof workspace.openSession === 'function') workspace.openSession(sessionId)
       else if (typeof sessions.open === 'function') sessions.open(sessionId)
@@ -443,6 +456,11 @@ window.__ModuleLoader__.load({
         zh: '中文',
         en: 'English',
         followUi: '跟随界面语言',
+        defaultModel: '默认模型',
+        defaultModelNone: '跟随宿主默认（不指定）',
+        modelHint: '新创建的提交会话使用所选模型；不指定时使用部署配置或宿主默认模型。',
+        modelLoading: '正在读取模型列表…',
+        modelUnavailable: '模型列表不可用：请在模型设置中确认至少一个提供商已配置。',
         save: '保存',
         saved: '已保存',
         failed: '保存失败，请重试',
@@ -456,6 +474,11 @@ window.__ModuleLoader__.load({
         zh: '中文',
         en: 'English',
         followUi: 'Follow UI language',
+        defaultModel: 'Default model',
+        defaultModelNone: 'Follow the host default (not specified)',
+        modelHint: 'Newly created commit sessions use the selected model; when unset, the deployment config or the host default model applies.',
+        modelLoading: 'Loading the model list…',
+        modelUnavailable: 'The model list is unavailable: make sure at least one provider is configured in the model settings.',
         save: 'Save',
         saved: 'Saved',
         failed: 'Save failed, please retry',
@@ -480,6 +503,121 @@ window.__ModuleLoader__.load({
         void error
       }
       return initial
+    }
+
+    /** The stored default-model route, or null when none is stored. */
+    function readDefaultModelValue(ctx) {
+      const forms = service(ctx, 'configForms')
+      if (!forms || typeof forms.get !== 'function') return null
+      try {
+        const form = forms.get(SETTINGS_NAMESPACE)
+        const snapshot = form && typeof form.getSnapshot === 'function' ? form.getSnapshot() : undefined
+        const value = snapshot && snapshot.status === 'ready' && snapshot.value && typeof snapshot.value === 'object'
+          ? snapshot.value
+          : undefined
+        if (value !== undefined) {
+          const field = value[DEFAULT_MODEL_FIELD]
+          if (field !== null && typeof field === 'object' && !Array.isArray(field)
+            && typeof field.provider === 'string' && field.provider !== ''
+            && typeof field.model === 'string' && field.model !== '') {
+            return { provider: field.provider, model: field.model }
+          }
+        }
+      } catch (error) {
+        void error
+      }
+      return null
+    }
+
+    /**
+     * The host `remote.session` namespace, when the deployment has one.
+     *
+     * Reading order matters on a live host: namespaced services are registered
+     * as `remote.session`, and the one access that needs NO inject declaration
+     * is the global service-store read `ctx.get('remote.session')` — the
+     * traceable `ctx.remote.session` property path throws
+     * `cannot get property "remote.session" without inject` for a consumer
+     * that did not declare it. All access is guarded so a missing or
+     * unfinished remote degrades to `undefined` instead of rejecting callers.
+     */
+    function remoteSession(ctx) {
+      try {
+        const direct = service(ctx, 'remote.session')
+        if (direct !== null && typeof direct === 'object') return direct
+      } catch (error) {
+        void error
+      }
+      let remote
+      try {
+        remote = service(ctx, 'remote')
+      } catch (error) {
+        void error
+        remote = undefined
+      }
+      if (remote !== null && typeof remote === 'object') {
+        try {
+          if (remote.session !== undefined && remote.session !== null) return remote.session
+        } catch (error) {
+          void error
+        }
+      }
+      return undefined
+    }
+
+    /** Stable identity for one provider/model route; treated as opaque, never parsed. */
+    function modelKey(route) {
+      return route.provider + '\u0000' + route.model
+    }
+
+    /**
+     * Load the host model catalog (`remote.session.modelCatalog`) — the same
+     * provider-grouped list the settings models page renders. The RPC answers
+     * the typert `RemoteResult` envelope (`{ ok, value }`) on the client, so
+     * both the raw catalog and the unwrapped value are accepted.
+     *
+     * The result is NEVER null: the dialog must not sit on its "loading" note
+     * forever. A host without the remote surface, a throwing service access or
+     * a rejected/failed catalog all resolve to an empty `{ groups: [], failed:
+     * true }` so the picker explains itself and keeps the valid "follow the
+     * host default" choice.
+     */
+    async function loadModelCatalog(ctx) {
+      let response
+      try {
+        const sessions = remoteSession(ctx)
+        if (sessions !== undefined && typeof sessions.modelCatalog === 'function') {
+          response = await sessions.modelCatalog()
+        }
+      } catch (error) {
+        void error
+      }
+      const raw = response !== null && typeof response === 'object' ? response : {}
+      const body = raw.ok !== undefined && raw.value !== undefined ? raw.value : raw
+      const groups = body !== null && typeof body === 'object' && Array.isArray(body.groups)
+        ? body.groups
+        : []
+      return { groups: groups, failed: groups.length === 0 }
+    }
+
+    /**
+     * Pin the stored default model onto a just-created session, best-effort.
+     *
+     * The session controller's `selectModel` is the same durable per-session
+     * selection the composer model seat installs, so the request header of the
+     * first prompt is built with this model. A missing remote surface or a
+     * route that vanished from the catalog must never block planning: the
+     * session then keeps the host default.
+     */
+    async function applyStoredDefaultModel(ctx, sessionId) {
+      const stored = readDefaultModelValue(ctx)
+      if (stored === null) return
+      const sessions = remoteSession(ctx)
+      if (!sessions || typeof sessions.selectModel !== 'function') return
+      try {
+        await sessions.selectModel({ sessionId: sessionId, provider: stored.provider, model: stored.model })
+      } catch (error) {
+        void error
+      }
     }
 
     /**
@@ -548,13 +686,114 @@ window.__ModuleLoader__.load({
       }, rows)
     }
 
-    /** Modal editing the prompt-language preference through configForms. */
-    function PromptLanguageDialog(props) {
+    /**
+     * Popup option card for the default-model choice: the no-default row
+     * first, then one row per catalog model grouped by provider. Rows carry
+     * the display name plus the exact route; Escape dismisses like the
+     * language card.
+     */
+    function ModelOptionsBox(props) {
+      const t = props.t
+      const onKeyDown = function (event) {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          event.stopPropagation()
+          props.onDismiss()
+        }
+      }
+      const isSelected = function (route) {
+        const draft = props.draft
+        return draft !== null && draft !== undefined
+          && draft.provider === route.provider && draft.model === route.model
+      }
+      const rows = []
+      const noneSelected = props.draft === null || props.draft === undefined
+      rows.push(h('button', {
+        type: 'button',
+        key: 'none',
+        role: 'option',
+        'aria-selected': noneSelected ? 'true' : 'false',
+        className: 'dsh-gca-dialog-option',
+        onClick: function () { props.onSelect(null) },
+      },
+        h('span', null, t('defaultModelNone')),
+        noneSelected ? h('span', { className: 'dsh-gca-dialog-optionCheck' }, h(CheckIcon)) : null,
+      ))
+      const groups = Array.isArray(props.catalog) ? props.catalog : []
+      for (const group of groups) {
+        if (group === null || typeof group !== 'object') continue
+        const models = Array.isArray(group.models) ? group.models : []
+        if (models.length === 0) continue
+        const provider = String(group.id || '')
+        const providerName = String(group.name || provider)
+        if (provider === '') continue
+        rows.push(h('div', {
+          key: 'group:' + provider,
+          className: 'dsh-gca-dialog-group',
+          role: 'presentation',
+        }, providerName))
+        for (const model of models) {
+          if (model === null || typeof model !== 'object') continue
+          const modelId = String(model.id || '')
+          if (modelId === '') continue
+          const route = { provider: provider, model: modelId }
+          const selected = isSelected(route)
+          rows.push(h('button', {
+            type: 'button',
+            key: modelKey(route),
+            role: 'option',
+            'aria-selected': selected ? 'true' : 'false',
+            className: 'dsh-gca-dialog-option',
+            onClick: function () { props.onSelect(route) },
+          },
+            h('span', { className: 'dsh-gca-dialog-modelText' },
+              h('span', null, String(model.name || modelId)),
+              h('span', { className: 'dsh-gca-dialog-modelRoute' }, providerName + ' · ' + provider + '/' + modelId),
+            ),
+            selected ? h('span', { className: 'dsh-gca-dialog-optionCheck' }, h(CheckIcon)) : null,
+          ))
+        }
+      }
+      return h('div', {
+        className: 'dsh-gca-dialog-options',
+        role: 'listbox',
+        'aria-label': t('defaultModel'),
+        onKeyDown: onKeyDown,
+      }, rows)
+    }
+
+    /** Trigger label for the current model draft: a friendly name once the
+     *  catalog is loaded, the exact route otherwise (a stored model that
+     *  vanished from the catalog stays recognizable). */
+    function modelOptionLabel(t, catalog, draft) {
+      if (draft === null || draft === undefined) return t('defaultModelNone')
+      if (catalog !== null && catalog !== undefined && typeof catalog === 'object') {
+        for (const group of Array.isArray(catalog.groups) ? catalog.groups : []) {
+          if (group === null || typeof group !== 'object' || String(group.id) !== draft.provider) continue
+          for (const model of Array.isArray(group.models) ? group.models : []) {
+            if (model === null || typeof model !== 'object' || String(model.id) !== draft.model) continue
+            return h('span', { className: 'dsh-gca-dialog-modelText' },
+              h('span', null, String(model.name || model.id)),
+              h('span', { className: 'dsh-gca-dialog-modelRoute' }, ' · ' + String(group.name || group.id)),
+            )
+          }
+        }
+      }
+      return h('span', { className: 'dsh-gca-dialog-modelText' },
+        h('span', null, draft.provider + '/' + draft.model),
+      )
+    }
+
+    /** Modal editing the prompt-language and default-model preferences through configForms. */
+    function ConfigureDialog(props) {
       const t = props.t
       const [draft, setDraft] = React.useState(props.initialValue)
+      const [modelDraft, setModelDraft] = React.useState(props.initialModel) // {provider, model} | null
       const [status, setStatus] = React.useState('idle') // idle | saving | saved | failed
       const [optionsOpen, setOptionsOpen] = React.useState(false)
+      const [modelOptionsOpen, setModelOptionsOpen] = React.useState(false)
       const wrapRef = React.useRef(null)
+      const modelWrapRef = React.useRef(null)
       const onKeyDown = function (event) {
         if (event.key === 'Escape') {
           event.preventDefault()
@@ -562,17 +801,20 @@ window.__ModuleLoader__.load({
           props.onClose()
         }
       }
-      /** Dismiss the popup card and detach its outside-pointer listener. */
+      /** Dismiss both popup cards and detach their outside-pointer listener. */
       const dismissOptions = function () {
         setOptionsOpen(false)
+        setModelOptionsOpen(false)
         if (typeof document !== 'undefined' && typeof Node !== 'undefined') {
           document.removeEventListener('pointerdown', onDocPointerDown, true)
         }
       }
-      /** Any pointer outside the option control closes the popup (PopupSelectView capture). */
+      /** Any pointer outside both option controls closes the popups (PopupSelectView capture). */
       const onDocPointerDown = function (event) {
-        if (wrapRef.current !== null && event.target instanceof Node && wrapRef.current.contains(event.target)) return
-        dismissOptions()
+        const outside = function (ref) {
+          return ref.current === null || !(event.target instanceof Node) || !ref.current.contains(event.target)
+        }
+        if (outside(wrapRef) && outside(modelWrapRef)) dismissOptions()
       }
       const toggleOptions = function () {
         if (optionsOpen) {
@@ -580,6 +822,18 @@ window.__ModuleLoader__.load({
           return
         }
         setOptionsOpen(true)
+        setModelOptionsOpen(false)
+        if (typeof document !== 'undefined' && typeof Node !== 'undefined') {
+          document.addEventListener('pointerdown', onDocPointerDown, true)
+        }
+      }
+      const toggleModelOptions = function () {
+        if (modelOptionsOpen) {
+          dismissOptions()
+          return
+        }
+        setModelOptionsOpen(true)
+        setOptionsOpen(false)
         if (typeof document !== 'undefined' && typeof Node !== 'undefined') {
           document.addEventListener('pointerdown', onDocPointerDown, true)
         }
@@ -590,14 +844,29 @@ window.__ModuleLoader__.load({
         let accepted = false
         try {
           const form = forms && typeof forms.get === 'function' ? forms.get(SETTINGS_NAMESPACE) : undefined
-          if (form && typeof form.set === 'function') {
-            accepted = await form.set(PROMPT_LANGUAGE_FIELD, draft)
+          if (form) {
+            const languageOp = { op: 'set', path: ['promptLanguage'], value: draft }
+            const modelOp = modelDraft === null || modelDraft === undefined
+              ? { op: 'unset', path: ['defaultModel'] }
+              : { op: 'set', path: ['defaultModel'], value: { provider: modelDraft.provider, model: modelDraft.model } }
+            if (typeof form.mutate === 'function') {
+              // One atomic mutation: both preferences land or neither does.
+              accepted = await form.mutate([languageOp, modelOp])
+            } else if (typeof form.set === 'function') {
+              accepted = await form.set(PROMPT_LANGUAGE_FIELD, draft)
+              if (accepted) {
+                accepted = modelDraft === null || modelDraft === undefined
+                  ? (typeof form.unset === 'function' ? Boolean(await form.unset(DEFAULT_MODEL_FIELD)) : true)
+                  : Boolean(await form.set(DEFAULT_MODEL_FIELD, { provider: modelDraft.provider, model: modelDraft.model }))
+              }
+            }
           }
         } catch (error) {
           void error
         }
         setStatus(accepted ? 'saved' : 'failed')
       }
+      const catalogAvailable = props.catalog !== null && props.catalog !== undefined
       // Container/backdrop aligned with the DSH settings shell: fixed overlay,
       // masked blur backdrop, elevated panel; close via Escape / mask / button.
       return h('div', { className: 'dsh-gca-dialog-overlay', role: 'presentation' },
@@ -646,6 +915,39 @@ window.__ModuleLoader__.load({
                 : null,
             ),
             h('p', { className: 'dsh-gca-dialog-hint' }, t('hint')),
+            h('label', { className: 'dsh-gca-dialog-label' }, t('defaultModel')),
+            h('div', { className: 'dsh-gca-dialog-select-wrap', ref: modelWrapRef },
+              h('button', {
+                type: 'button',
+                className: 'dsh-gca-dialog-select',
+                'aria-label': t('defaultModel'),
+                'aria-haspopup': 'listbox',
+                'aria-expanded': modelOptionsOpen ? 'true' : 'false',
+                onClick: toggleModelOptions,
+              }, modelOptionLabel(t, props.catalog, modelDraft)),
+              h(ChevronDownIcon),
+              modelOptionsOpen
+                ? h(ModelOptionsBox, {
+                    t: t,
+                    catalog: catalogAvailable ? props.catalog.groups : [],
+                    draft: modelDraft,
+                    onSelect: function (route) {
+                      setModelDraft(route)
+                      setStatus('idle')
+                      dismissOptions()
+                    },
+                    onDismiss: dismissOptions,
+                  })
+                : null,
+            ),
+            // The list may still be loading while the dialog is open; a
+            // missing list must not hide the valid "follow host default"
+            // choice.
+            !catalogAvailable
+              ? h('p', { className: 'dsh-gca-dialog-hint' }, t('modelLoading'))
+              : props.catalog.failed && props.catalog.groups.length === 0
+                ? h('p', { className: 'dsh-gca-dialog-hint' }, t('modelUnavailable'))
+                : h('p', { className: 'dsh-gca-dialog-hint' }, t('modelHint')),
             status === 'saved'
               ? h('p', { className: 'dsh-gca-dialog-ok' }, t('saved'))
               : null,
@@ -671,6 +973,8 @@ window.__ModuleLoader__.load({
       const t = props.t
       const [open, setOpen] = React.useState(false)
       const [initialValue, setInitialValue] = React.useState('follow-ui')
+      const [initialModel, setInitialModel] = React.useState(null)
+      const [catalog, setCatalog] = React.useState(null) // null | { groups, failed }
       const triggerRef = React.useRef(null)
       const closeDialog = function () {
         setOpen(false)
@@ -696,14 +1000,22 @@ window.__ModuleLoader__.load({
           ref: triggerRef,
           onClick: function () {
             setInitialValue(readPromptLanguageValue(props.ctx))
+            setInitialModel(readDefaultModelValue(props.ctx))
             setOpen(true)
+            // Refresh the host model list in the background; the dialog shows
+            // a loading note until it settles.
+            Promise.resolve(loadModelCatalog(props.ctx)).then(function (loaded) {
+              setCatalog(loaded)
+            }).catch(function () {})
           },
         }, h(GearIcon)),
         open
-          ? h(PromptLanguageDialog, {
+          ? h(ConfigureDialog, {
               ctx: props.ctx,
               t: t,
               initialValue: initialValue,
+              initialModel: initialModel,
+              catalog: catalog,
               onClose: closeDialog,
             })
           : null,
@@ -893,12 +1205,13 @@ window.__ModuleLoader__.load({
             const subject = String(entry.message || '').split('\n')[0]
             const stat = entry.stat && typeof entry.stat === 'object' ? entry.stat : null
             const rowChildren = [
-              h('span', null, String(index + 1) + ' ' + subject),
-              stat !== null ? h('span', { className: 'dsh-gca-stat' }, statText(stat)) : null,
-              entry.patchTruncated === true ? h('span', { className: 'dsh-gca-note' }, '部分预览') : null,
+              h('span', { key: 'index' }, String(index + 1) + ' ' + subject),
+              stat !== null ? h('span', { key: 'stat', className: 'dsh-gca-stat' }, statText(stat)) : null,
+              entry.patchTruncated === true ? h('span', { key: 'note', className: 'dsh-gca-note' }, '部分预览') : null,
               h(
                 'button',
                 {
+                  key: 'details',
                   type: 'button',
                   onClick: function () { toggle('details:' + entry.commitId) },
                 },
@@ -907,6 +1220,7 @@ window.__ModuleLoader__.load({
               h(
                 'button',
                 {
+                  key: 'diff',
                   type: 'button',
                   onClick: function () {
                     openDiff(Object.assign({}, entry, { planId: meta.planId, revision: meta.revision }), sessionId)
@@ -1184,13 +1498,19 @@ window.__ModuleLoader__.load({
       resolvePromptLanguage: resolvePromptLanguage,
       promptLanguageFor: promptLanguageFor,
       readPromptLanguageValue: readPromptLanguageValue,
+      readDefaultModelValue: readDefaultModelValue,
+      loadModelCatalog: loadModelCatalog,
+      applyStoredDefaultModel: applyStoredDefaultModel,
+      modelKey: modelKey,
       CardConfigureAction: CardConfigureAction,
-      PromptLanguageDialog: PromptLanguageDialog,
+      ConfigureDialog: ConfigureDialog,
       LanguageOptionsBox: LanguageOptionsBox,
+      ModelOptionsBox: ModelOptionsBox,
       CARD_ACTION_LOCALE: CARD_ACTION_LOCALE,
       CARD_ACTION_COPY: CARD_ACTION_COPY,
       CONFIGURED_PRESET_ID: CONFIGURED_PRESET_ID,
       PROMPT_LANGUAGE_IDS: PROMPT_LANGUAGE_IDS,
+      DEFAULT_MODEL_FIELD: DEFAULT_MODEL_FIELD,
       SETTINGS_NAMESPACE: SETTINGS_NAMESPACE,
       startPlanning: startPlanning,
       openPlanDiff: openPlanDiff,

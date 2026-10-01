@@ -21,6 +21,16 @@
 # default model or an explicit `agentOptions` below; otherwise the first turn
 # ends at prompt assembly with `prompt variable "{{model}}" has no value`.
 #
+# The model for dedicated sessions resolves in precedence order:
+#   1. the stored settings preference `defaultModel` ({provider, model}, edited
+#      from the preset-card Configure dialog, whose picker lists the host's
+#      model catalog) — it overrides the provider/model here;
+#   2. `agentOptions` below (its other options, e.g. reasoningEffort and
+#      maxTokens, still apply);
+#   3. nothing — the host default model is used.
+# "No default model" is a valid preference: clearing `defaultModel` in the
+# Configure dialog falls back to steps 2-3.
+#
 # Example with an explicit model for the dedicated commit session:
 #
 #   - insert:
