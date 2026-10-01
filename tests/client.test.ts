@@ -159,6 +159,8 @@ function fakeCtx(options: {
   configForms?: Record<string, unknown>
   /** Fake `locale` service (UI language for prompt-language resolution). */
   locale?: Record<string, unknown>
+  /** Fake `remote` service whose `session` namespace answers model RPCs. */
+  remote?: Record<string, unknown>
 } = {}): {
   ctx: Record<string, unknown>
   actions: Array<Record<string, unknown>>
@@ -169,6 +171,7 @@ function fakeCtx(options: {
   submits: number
   tabs: Array<Record<string, unknown>>
   logged: string[]
+  modelSelections: Array<Record<string, unknown>>
 } {
   const actions: Array<Record<string, unknown>> = []
   const toolviews: Array<{ key: string; options: Record<string, unknown>; component: (props: Record<string, unknown>) => unknown }> = []
@@ -177,6 +180,7 @@ function fakeCtx(options: {
   const drafts: string[] = []
   const tabs: Array<Record<string, unknown>> = []
   const logged: string[] = []
+  const modelSelections: Array<Record<string, unknown>> = []
   const state = { submits: 0 }
 
   const sidebar = {
@@ -232,6 +236,7 @@ function fakeCtx(options: {
     },
     configForms: options.configForms,
     locale: options.locale,
+    remote: options.remote,
     betterSidebar: options.withSidebar === false ? undefined : sidebar,
   }
 
@@ -265,6 +270,7 @@ function fakeCtx(options: {
     drafts,
     tabs,
     logged,
+    modelSelections,
     get submits() {
       return state.submits
     },
@@ -631,9 +637,13 @@ test('the client prompt builder emits zh and en from the fourth argument', async
   const zh = build('/repo-wt', 'main', 0, 'zh')
   assert.ok(zh.includes('请为这个 worktree 规划提交'))
   assert.ok(zh.includes('当前没有已暂存内容'))
+  assert.ok(zh.includes('每一步都必须使用工具'))
+  assert.ok(zh.includes('都必须使用中文'))
   const en = build('/repo-wt', 'main', 0, 'en')
   assert.ok(en.includes('Plan commits for this worktree.'))
   assert.ok(en.includes('There is nothing staged yet'))
+  assert.ok(en.includes('Use the tools for every step'))
+  assert.ok(en.includes('in English'))
   const zhStaged = build('/repo-wt', 'main', 2, 'zh')
   assert.ok(!zhStaged.includes('当前没有已暂存内容'))
   // Historical default: no language argument means Chinese (kept for the
@@ -729,13 +739,13 @@ test('the card action renders only for the configured preset and vanishes for ev
 
 test('the card-action dialog renders with the settings-style shell and closes through every path', async () => {
   const { exports } = await loadBundle()
-  const calls: Array<{ field: string; value: unknown }> = []
+  const calls: Array<Record<string, unknown>> = []
   const forms = {
     getSnapshot() {
       return { status: 'ready', value: { promptLanguage: 'en' } }
     },
-    async set(field: string, value: unknown) {
-      calls.push({ field, value })
+    async mutate(ops: Array<Record<string, unknown>>) {
+      calls.push(...ops)
       return true
     },
   }
@@ -753,9 +763,19 @@ test('the card-action dialog renders with the settings-style shell and closes th
 
   // The dialog uses the settings-shell structure: mask + elevated panel with a
   // header and a dictionary-labeled close button.
-  const Dialog = (exports['__test'] as Record<string, unknown>)['PromptLanguageDialog'] as (props: Record<string, unknown>) => unknown
+  const Dialog = (exports['__test'] as Record<string, unknown>)['ConfigureDialog'] as (props: Record<string, unknown>) => unknown
   let closed = 0
-  const dialog = Dialog({ ctx: harness.ctx, t, initialValue: 'zh', onClose: () => { closed += 1 } })
+  const catalog = {
+    groups: [
+      { id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }] },
+    ],
+    failed: false,
+  }
+  const dialog = Dialog({
+    ctx: harness.ctx, t, initialValue: 'zh',
+    initialModel: { provider: 'deepseek', model: 'deepseek-chat' },
+    catalog, onClose: () => { closed += 1 },
+  })
 
   const mask = findByClassName(dialog as never, 'dsh-gca-dialog-mask')
   assert.ok(mask, 'a full-screen mask should exist')
@@ -779,19 +799,27 @@ test('the card-action dialog renders with the settings-style shell and closes th
   ;(closeButton.props as { onClick?: () => void }).onClick?.()
   assert.equal(closed, 3, 'the close button should close the dialog')
 
-  // The option control is a switcher-style trigger button announcing the
-  // popup card; the current draft is shown as its label.
-  const selectWrap = findByClassName(dialog as never, 'dsh-gca-dialog-select-wrap')
-  assert.ok(selectWrap, 'the option control should sit in a switcher-style wrapper')
-  const trigger = findByClassName(dialog as never, 'dsh-gca-dialog-select')
-  assert.ok(trigger, 'the option control should be a trigger button')
-  assert.equal(trigger.type, 'button')
-  assert.equal(String(trigger.props['aria-haspopup']), 'listbox')
-  assert.equal(String(trigger.props['aria-expanded']), 'false')
-  // The wrapper draws the switcher chevron (decorative) beside the trigger.
-  const chevron = findByClassName(dialog as never, 'dsh-gca-chevron')
-  assert.ok(chevron, 'a chevron svg should decorate the option control')
-  assert.equal(chevron.type, 'svg')
+  // Two option controls (language + default model), each a switcher-style
+  // trigger button announcing its popup card.
+  const triggers = [] as Array<{ props: Record<string, unknown> }>
+  walk(dialog, (element) => {
+    if (String(element.props['className']).split(/\s+/).includes('dsh-gca-dialog-select')) {
+      triggers.push(element as never)
+    }
+  })
+  assert.equal(triggers.length, 2, 'language and default-model controls should both render')
+  assert.equal(String(triggers[0]?.props['aria-haspopup']), 'listbox')
+  assert.equal(String(triggers[0]?.props['aria-expanded']), 'false')
+  assert.equal(String(triggers[1]?.props['aria-label']), 'defaultModel')
+  // The model trigger shows the friendly display name once the catalog loaded.
+  assert.ok(findByClassName(dialog as never, 'dsh-gca-dialog-modelRoute'), 'the model route should decorate the trigger label')
+  // The wrapper draws the switcher chevron (decorative) beside each trigger.
+  const chevrons: Array<{ type: string }> = []
+  walk(dialog, (element) => {
+    if (String(element.props['className']).split(/\s+/).includes('dsh-gca-chevron')) chevrons.push(element as never)
+  })
+  assert.equal(chevrons.length, 2, 'each option control should carry a chevron')
+  assert.equal(chevrons[0]?.type, 'svg')
   const buttons: Array<{ props: { onClick?: () => void; className?: string } }> = []
   walk(dialog, (element) => {
     if (element.type === 'button') buttons.push(element as never)
@@ -801,7 +829,73 @@ test('the card-action dialog renders with the settings-style shell and closes th
   const save = buttons.find((b) => b.props.className === 'dsh-gca-primary')
   assert.ok(save)
   await (save.props.onClick as () => Promise<void>)()
-  assert.deepEqual(calls, [{ field: 'promptLanguage', value: 'zh' }])
+  // One atomic mutation carries both preferences; the chosen model is stored
+  // as the volatile `defaultModel` object.
+  assert.deepEqual(calls, [
+    { op: 'set', path: ['promptLanguage'], value: 'zh' },
+    { op: 'set', path: ['defaultModel'], value: { provider: 'deepseek', model: 'deepseek-chat' } },
+  ])
+
+  // Choosing "no default model" stores an unset instead of a route: the field
+  // must be clearable back to the host default.
+  const clearCalls: Array<Record<string, unknown>> = []
+  const clearForms = {
+    getSnapshot() {
+      return { status: 'ready', value: { promptLanguage: 'en' } }
+    },
+    async mutate(ops: Array<Record<string, unknown>>) {
+      clearCalls.push(...ops)
+      return true
+    },
+  }
+  const clearDialog = Dialog({
+    ctx: { ...harness.ctx, get: (name: string) => (name === 'configForms' ? { get: () => clearForms } : undefined) },
+    t, initialValue: 'zh', initialModel: null, catalog, onClose: () => undefined,
+  })
+  const clearButtons: Array<{ props: { onClick?: () => void; className?: string } }> = []
+  walk(clearDialog, (element) => {
+    if (element.type === 'button') clearButtons.push(element as never)
+  })
+  const clearPrimary = clearButtons.find((b) => b.props.className === 'dsh-gca-primary')
+  assert.ok(clearPrimary)
+  await (clearPrimary.props.onClick as () => Promise<void>)()
+  assert.deepEqual(clearCalls, [
+    { op: 'set', path: ['promptLanguage'], value: 'zh' },
+    { op: 'unset', path: ['defaultModel'] },
+  ])
+})
+
+test('the dialog falls back to individual set/unset writes when the form has no mutate', async () => {
+  const { exports } = await loadBundle()
+  const calls: Array<{ field: string; value: unknown }> = []
+  const forms = {
+    getSnapshot() {
+      return { status: 'ready', value: { promptLanguage: 'en' } }
+    },
+    async set(field: string, value: unknown) {
+      calls.push({ field, value })
+      return true
+    },
+    async unset(field: string) {
+      calls.push({ field, value: undefined })
+      return true
+    },
+  }
+  const harness = fakeCtx({ configForms: { get: () => forms } })
+  const Dialog = (exports['__test'] as Record<string, unknown>)['ConfigureDialog'] as (
+    props: Record<string, unknown>,
+  ) => unknown
+  const t = (key: string): string => key
+  const dialog = Dialog({
+    ctx: harness.ctx, t, initialValue: 'en', initialModel: null, catalog: null, onClose: () => undefined,
+  })
+  const save = findByClassName(dialog as never, 'dsh-gca-primary')
+  assert.ok(save)
+  await (save.props.onClick as () => Promise<void>)()
+  assert.deepEqual(calls, [
+    { field: 'promptLanguage', value: 'en' },
+    { field: 'defaultModel', value: undefined },
+  ])
 })
 
 test('the popup option card lists every language, marks the draft, picks on click, dismisses on Escape', async () => {
@@ -840,4 +934,276 @@ test('the popup option card lists every language, marks the draft, picks on clic
   const boxProps = listbox.props as { onKeyDown?: (event: typeof escape) => void }
   boxProps.onKeyDown?.(escape)
   assert.equal(dismissed, 1, 'Escape should dismiss the popup card')
+})
+
+test('the model option card lists the no-default row then every catalog model, grouped by provider', async () => {
+  const { exports } = await loadBundle()
+  const Box = (exports['__test'] as Record<string, unknown>)['ModelOptionsBox'] as (
+    props: Record<string, unknown>,
+  ) => unknown
+  const t = (key: string) => key
+  const picked: Array<{ provider: string; model: string } | null> = []
+  let dismissed = 0
+  const catalog = [
+    { id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }] },
+    { id: 'anthropic', name: 'Anthropic', models: [{ id: 'claude-test', name: 'Claude Test' }] },
+    { id: 'empty-provider', name: 'Empty', models: [] },
+  ]
+  const box = Box({
+    t,
+    catalog,
+    draft: { provider: 'anthropic', model: 'claude-test' },
+    onSelect: (route: { provider: string; model: string } | null) => { picked.push(route) },
+    onDismiss: () => { dismissed += 1 },
+  })
+
+  const listbox = findByClassName(box as never, 'dsh-gca-dialog-options')
+  assert.ok(listbox, 'the popup card should exist')
+  assert.equal(listbox.props['role'], 'listbox')
+  assert.equal(String(listbox.props['aria-label']), 'defaultModel')
+  const rows: Array<{ props: { role?: string; 'aria-selected'?: string; onClick?: () => void } }> = []
+  const groups: Array<{ props: { children?: unknown } }> = []
+  walk(box, (element) => {
+    if (String(element.props['className']).split(/\s+/).includes('dsh-gca-dialog-option')) rows.push(element as never)
+    if (String(element.props['className']).split(/\s+/).includes('dsh-gca-dialog-group')) groups.push(element as never)
+  })
+  // One no-default row plus one row per advertised model; empty providers are skipped.
+  assert.deepEqual(rows.map((r) => r.props['role']), ['option', 'option', 'option'])
+  assert.equal(groups.length, 2, 'provider group headers render only for providers with models')
+  assert.equal(rows[0]?.props['aria-selected'], 'false', 'the no-default row is not selected')
+  assert.equal(rows[1]?.props['aria-selected'], 'false')
+  assert.equal(rows[2]?.props['aria-selected'], 'true', 'the draft route row is selected')
+  // Only the selected row carries a trailing check.
+  const checks: Array<{ props: { className?: string } }> = []
+  walk(box, (element) => {
+    if (String(element.props['className']).split(/\s+/).includes('dsh-gca-dialog-optionCheck')) checks.push(element as never)
+  })
+  assert.equal(checks.length, 1)
+
+  // Clicking "no default" clears the draft; clicking a model picks its exact route.
+  rows[0]?.props.onClick?.()
+  assert.deepEqual(picked, [null])
+  rows[1]?.props.onClick?.()
+  assert.deepEqual(picked, [null, { provider: 'deepseek', model: 'deepseek-chat' }])
+  const key = (exports['__test'] as Record<string, unknown>)['modelKey'] as (route: unknown) => string
+  assert.equal(key({ provider: 'a', model: 'b' }), 'a\u0000b', 'the route key is opaque and collision-free')
+  const escape = { key: 'Escape', preventDefault: () => undefined, stopPropagation: () => undefined }
+  const boxProps = listbox.props as { onKeyDown?: (event: typeof escape) => void }
+  boxProps.onKeyDown?.(escape)
+  assert.equal(dismissed, 1, 'Escape should dismiss the model card')
+})
+
+test('the client reads the stored default-model route from the settings namespace', async () => {
+  const { exports } = await loadBundle()
+  const read = (exports['__test'] as Record<string, unknown>)['readDefaultModelValue'] as (ctx: unknown) => unknown
+  const services = {
+    configForms: {
+      get() {
+        return {
+          getSnapshot() {
+            return { status: 'ready', value: { defaultModel: { provider: 'anthropic', model: 'claude-test' } } }
+          },
+        }
+      },
+    },
+  }
+  const ctx = { get: (name: string) => services[name as keyof typeof services] }
+  assert.deepEqual(read(ctx), { provider: 'anthropic', model: 'claude-test' })
+  // No stored route is the valid "no default" state.
+  const formsService = services.configForms as { get: () => { getSnapshot(): { status: string; value: Record<string, unknown> } } }
+  formsService.get = () => ({ getSnapshot() { return { status: 'ready', value: {} } } })
+  assert.equal(read(ctx), null)
+  formsService.get = () => ({
+    getSnapshot() { return { status: 'ready', value: { defaultModel: { provider: '' } } } },
+  })
+  assert.equal(read(ctx), null, 'a malformed stored route degrades to no default')
+  // No forms surface at all: no default.
+  assert.equal(read({ get: () => undefined }), null)
+})
+
+test('a session started with a stored default model pins it before the prompt is submitted', async () => {
+  const { exports } = await loadBundle()
+  const start = (exports['__test'] as Record<string, unknown>)['startPlanning'] as (
+    ctx: unknown,
+    target: Record<string, unknown>,
+  ) => Promise<string>
+  const harness = fakeCtx({
+    configForms: {
+      get() {
+        return {
+          getSnapshot() {
+            return { status: 'ready', value: { defaultModel: { provider: 'anthropic', model: 'claude-test' } } }
+          },
+        }
+      },
+    },
+    remote: {
+      session: {
+        async selectModel(request: Record<string, unknown>) {
+          harness.modelSelections.push(request)
+        },
+      },
+    },
+  })
+  const sessionId = await start(harness.ctx, { worktree: '/repo-wt', branch: 'main', staged: [] })
+  assert.equal(harness.created.length, 1)
+  assert.equal(sessionId, harness.created[0]?.['sessionId'])
+  // Exactly one durable selection RPC, carrying the exact stored route.
+  assert.deepEqual(harness.modelSelections, [
+    { sessionId, provider: 'anthropic', model: 'claude-test' },
+  ])
+  assert.equal(harness.submits, 1, 'the prompt is still submitted after the model is pinned')
+})
+
+test('without a stored default model the session start makes no model RPC', async () => {
+  const { exports } = await loadBundle()
+  const start = (exports['__test'] as Record<string, unknown>)['startPlanning'] as (
+    ctx: unknown,
+    target: Record<string, unknown>,
+  ) => Promise<string>
+  const harness = fakeCtx({
+    configForms: { get: () => ({ getSnapshot() { return { status: 'ready', value: {} } } }) },
+    remote: {
+      session: {
+        async selectModel(request: Record<string, unknown>) {
+          harness.modelSelections.push(request)
+        },
+      },
+    },
+  })
+  await start(harness.ctx, { worktree: '/repo-wt', branch: 'main', staged: [] })
+  assert.deepEqual(harness.modelSelections, [], 'no stored route means the host default applies')
+  assert.equal(harness.submits, 1)
+})
+
+test('a failed model RPC or a missing remote never blocks starting the session', async () => {
+  const { exports } = await loadBundle()
+  const start = (exports['__test'] as Record<string, unknown>)['startPlanning'] as (
+    ctx: unknown,
+    target: Record<string, unknown>,
+  ) => Promise<string>
+  // The remote rejects (route vanished from the catalog): planning continues.
+  const rejecting = fakeCtx({
+    configForms: {
+      get() {
+        return {
+          getSnapshot() {
+            return { status: 'ready', value: { defaultModel: { provider: 'gone', model: 'model-x' } } }
+          },
+        }
+      },
+    },
+    remote: {
+      session: {
+        async selectModel() {
+          throw new Error('session/model-unavailable')
+        },
+      },
+    },
+  })
+  const sessionId = await start(rejecting.ctx, { worktree: '/repo-wt', branch: 'main', staged: [] })
+  assert.equal(sessionId, rejecting.created[0]?.['sessionId'])
+  assert.equal(rejecting.submits, 1)
+  // No remote surface at all (an embedder without the gateway): same outcome.
+  const bare = fakeCtx({
+    configForms: {
+      get() {
+        return {
+          getSnapshot() {
+            return { status: 'ready', value: { defaultModel: { provider: 'anthropic', model: 'claude-test' } } }
+          },
+        }
+      },
+    },
+  })
+  await start(bare.ctx, { worktree: '/repo-wt', branch: 'main', staged: [] })
+  assert.equal(bare.submits, 1)
+})
+
+test('the catalog loader resolves instead of hanging: missing remote, throwing access and rejected RPC all degrade', async () => {
+  const { exports } = await loadBundle()
+  const load = (exports['__test'] as Record<string, unknown>)['loadModelCatalog'] as (
+    ctx: unknown,
+  ) => Promise<{ groups: unknown[]; failed: boolean }>
+
+  // No remote surface: resolved with the unavailable marker, never null.
+  const bare = fakeCtx()
+  assert.deepEqual(await load(bare.ctx), { groups: [], failed: true })
+
+  // Property access for a non-injected namespaced service throws on some
+  // hosts ("cannot get property ... without inject"): the loader must catch
+  // it and degrade, not reject.
+  const throwing = fakeCtx({
+    remote: Object.defineProperty({}, 'session', {
+      get() {
+        throw new Error('cannot get property "session" without inject')
+      },
+    }),
+  })
+  assert.deepEqual(await load(throwing.ctx), { groups: [], failed: true })
+
+  // The RPC rejects: same degrade.
+  const rejecting = fakeCtx({
+    remote: {
+      session: {
+        async modelCatalog() {
+          throw new Error('catalog lookup failed')
+        },
+      },
+    },
+  })
+  assert.deepEqual(await load(rejecting.ctx), { groups: [], failed: true })
+
+  // A live catalog surfaces the provider groups.
+  const live = fakeCtx({
+    remote: {
+      session: {
+        async modelCatalog() {
+          return { groups: [{ id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat' }] }] }
+        },
+      },
+    },
+  })
+  const loaded = await load(live.ctx)
+  assert.equal(loaded.failed, false)
+  assert.equal(loaded.groups.length, 1)
+  assert.equal((loaded.groups[0] as { id: string }).id, 'deepseek')
+
+  // The typert RemoteResult envelope (`{ ok, value }`) is unwrapped: host
+  // RPCs answer in this shape on the client, so the raw catalog lives under
+  // `value`.
+  const enveloped = fakeCtx({
+    remote: {
+      session: {
+        async modelCatalog() {
+          return {
+            ok: true,
+            value: {
+              groups: [{ id: 'anthropic', name: 'Anthropic', models: [{ id: 'claude-test', name: 'Claude Test' }] }],
+            },
+          }
+        },
+      },
+    },
+  })
+  const unwrapped = await load(enveloped.ctx)
+  assert.equal(unwrapped.failed, false)
+  assert.equal((unwrapped.groups[0] as { id: string }).id, 'anthropic')
+
+  // The namespaced service is also reachable through the global service store
+  // (`ctx.get('remote.session')`) without any inject declaration — the access
+  // a hand-written bundle relies on when `ctx.remote.session` would throw
+  // "cannot get property ... without inject".
+  const viaStore = {
+    get(name: string) {
+      if (name !== 'remote.session') return undefined
+      return {
+        async modelCatalog() {
+          return { ok: true, value: { groups: [] } }
+        },
+      }
+    },
+  }
+  const stored = await load(viaStore)
+  assert.deepEqual(stored, { groups: [], failed: true })
 })

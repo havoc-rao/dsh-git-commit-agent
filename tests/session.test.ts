@@ -558,3 +558,127 @@ test('a settings row under the module name is ignored: only the entry id namespa
     await fixture.cleanup()
   }
 })
+
+test('the stored default-model preference overrides the deployment agentOptions row', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const captured: Array<{ agentOptions?: unknown }> = []
+    const registry = recordingAgents({
+      async create(options) {
+        captured.push(options as never)
+        return fixedAgent('session-git-commit-model-1')
+      },
+    })
+    const plugin = apply(sessionHost(registry, undefined, {
+      // The settings namespace is the cordis row id (`git-commit-agent`);
+      // `defaultModel` is the volatile field the configure surface writes.
+      describe: () => [{
+        ns: 'git-commit-agent',
+        value: { defaultModel: { provider: 'anthropic', model: 'claude-sonnet-4-5' } },
+      }],
+    }), {
+      dataDir: fixture.dataDir,
+      agentOptions: { provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' },
+    })
+    const started = await plugin.api.startDedicatedSession({
+      workspacePath: fixture.root,
+      sourceSessionId: null,
+    })
+    assert.match(started.sessionId, /^session-git-commit-/)
+    const createOptions = captured[0] as { agentOptions?: Record<string, unknown> }
+    assert.ok(createOptions)
+    // The user-selected route wins; unrelated row options are preserved.
+    assert.deepEqual(createOptions.agentOptions, {
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5',
+      reasoningEffort: 'high',
+    })
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('without a stored preference the deployment agentOptions row passes through', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const captured: Array<{ agentOptions?: unknown }> = []
+    const registry = recordingAgents({
+      async create(options) {
+        captured.push(options as never)
+        return fixedAgent('session-git-commit-model-2')
+      },
+    })
+    // No settings service at all: the row is the only model source.
+    const plugin = apply(sessionHost(registry), {
+      dataDir: fixture.dataDir,
+      agentOptions: { provider: 'deepseek', model: 'deepseek-chat' },
+    })
+    const started = await plugin.api.startDedicatedSession({
+      workspacePath: fixture.root,
+      sourceSessionId: null,
+    })
+    assert.match(started.sessionId, /^session-git-commit-/)
+    const createOptions = captured[0] as { agentOptions?: Record<string, unknown> }
+    assert.deepEqual(createOptions.agentOptions, { provider: 'deepseek', model: 'deepseek-chat' })
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('with neither a preference nor a row the host default model applies unconstrained', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const captured: Array<{ agentOptions?: unknown }> = []
+    const registry = recordingAgents({
+      async create(options) {
+        captured.push(options as never)
+        return fixedAgent('session-git-commit-model-3')
+      },
+    })
+    const plugin = apply(sessionHost(registry), { dataDir: fixture.dataDir })
+    const started = await plugin.api.startDedicatedSession({
+      workspacePath: fixture.root,
+      sourceSessionId: null,
+    })
+    assert.match(started.sessionId, /^session-git-commit-/)
+    assert.equal(captured[0]?.agentOptions, undefined, 'the host supplies its own default')
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
+
+test('a malformed stored default model is ignored, keeping the deployment row', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    const captured: Array<{ agentOptions?: unknown }> = []
+    const registry = recordingAgents({
+      async create(options) {
+        captured.push(options as never)
+        return fixedAgent('session-git-commit-model-4')
+      },
+    })
+    const plugin = apply(sessionHost(registry, undefined, {
+      describe: () => [{
+        ns: 'git-commit-agent',
+        value: { defaultModel: { provider: '' } },
+      }],
+    }), {
+      dataDir: fixture.dataDir,
+      agentOptions: { provider: 'deepseek', model: 'deepseek-chat' },
+    })
+    const started = await plugin.api.startDedicatedSession({
+      workspacePath: fixture.root,
+      sourceSessionId: null,
+    })
+    assert.match(started.sessionId, /^session-git-commit-/)
+    const createOptions = captured[0] as { agentOptions?: Record<string, unknown> }
+    // An unusable stored route must not poison session creation: the row applies.
+    assert.deepEqual(createOptions.agentOptions, { provider: 'deepseek', model: 'deepseek-chat' })
+    await plugin.dispose()
+  } finally {
+    await fixture.cleanup()
+  }
+})
