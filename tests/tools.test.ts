@@ -184,7 +184,7 @@ test('prepare_plan then apply_plan commits through the tool surface', async () =
   const fixture = await createInitialisedFixture()
   try {
     await writeFile(fixture.root, 'src/feature.ts', 'export const feature = 1\n')
-    const { service, tools } = toolsFor(fixture, async () => ({ approved: true, selected: ['Approve'] }))
+    const { service, tools } = toolsFor(fixture, async () => ({ approved: true }))
     const exec = execContext()
 
     const status = (await toolNamed(tools, 'commit_agent_inspect').execute({}, exec)) as Record<string, unknown>
