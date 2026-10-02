@@ -75,15 +75,20 @@ export interface ToolDependencies {
   /**
    * Ask the human to approve one exact plan revision.
    *
-   * Supplied by the host integration (the DSH `plan-review` question intent).
-   * When absent, the apply tool reports that interactive approval is
-   * unavailable instead of approving anything by itself.
+   * Supplied by the host integration (the DSH `approval` service, see
+   * `src/index.ts` `requestPlanApproval`). When absent, the apply tool reports
+   * that interactive approval is unavailable instead of approving anything by
+   * itself.
    */
   askUserApproval?(prompt: UserApprovalPrompt): Promise<UserApprovalDecision>
 }
 
-/** One approval prompt handed to the host's question surface. */
+/** One approval prompt handed to the host's approval surface. */
 export interface UserApprovalPrompt {
+  /** The tool initiating the approval (displayed in the approval panel). */
+  readonly toolName: string
+  /** The exact tool call being decided, when the execution carries one. */
+  readonly callId?: string
   readonly header: string
   readonly question: string
   /** The plan document the decision is about; must equal what the digest covers. */
@@ -95,11 +100,9 @@ export interface UserApprovalPrompt {
   readonly signal?: AbortSignal
 }
 
-/** The human's decision. */
+/** The human's decision, closed over the approval outcome vocabulary. */
 export interface UserApprovalDecision {
   readonly approved: boolean
-  readonly selected: readonly string[]
-  readonly custom?: string
 }
 
 /** Build one text-only render projection. */
@@ -565,24 +568,25 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
    * Human approval + execution, one model decision.
    *
    * The old surface made the model call `request_approval` and then a separate
-   * `execute_plan`, but the host's plan-review panel already frames approval as
-   * "approve and let the executor create these commits"; the extra model turn
-   * added nothing except a second chance to misstep. The host still verifies
-   * everything between the human decision and git commit: the revision is the
-   * newest, the digest matches the stored content, the repository still matches
-   * the plan snapshot and the exact staged tree equals the approved tree.
+   * `execute_plan`, but the host's approval panel already frames approval as
+   * "allow once and execute"; the extra model turn added nothing except a
+   * second chance to misstep. The host still verifies everything between the
+   * human decision and git commit: the revision is the newest, the digest
+   * matches the stored content, the repository still matches the plan snapshot
+   * and the exact staged tree equals the approved tree.
    */
   const applyPlan: HostToolDefinition = {
     name: 'commit_agent_apply_plan',
     description:
       'Submit exactly one plan revision to the human for approval and, once approved, execute it. The host shows '
-      + 'the plan document through its own plan-review panel and records the decision; you cannot approve a plan '
-      + 'yourself, and a revision that was never approved is never committed. Only the newest revision of a plan '
-      + 'can be applied. The host re-verifies the content digest, that the repository still matches the plan '
-      + 'snapshot and that the exact staged tree equals the approved tree before running git commit — your call '
-      + 'never bypasses those checks. If the user declines nothing is approved or committed: ask what should '
-      + 'change, prepare a new revision, and apply again. Never retry after a failed execution: report the partial '
-      + 'result (commit_agent_inspect mode=reconcile) and ask the user how to proceed.',
+      + 'the approval panel with a short reason; the full plan document is the transcript of this call (the plan '
+      + 'was already presented by commit_agent_prepare_plan). You cannot approve a plan yourself, and a revision '
+      + 'that was never approved is never committed. Only the newest revision of a plan can be applied. The host '
+      + 're-verifies the content digest, that the repository still matches the plan snapshot and that the exact '
+      + 'staged tree equals the approved tree before running git commit — your call never bypasses those checks. '
+      + 'If the user declines (or the approval is withdrawn or unavailable) nothing is approved or committed: ask '
+      + 'what should change, prepare a new revision, and apply again. Never retry after a failed execution: report '
+      + 'the partial result (commit_agent_inspect mode=reconcile) and ask the user how to proceed.',
     parameters: parameters(
       {
         planId: stringProp('Plan id to submit for approval.'),
@@ -607,15 +611,11 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
       },
       render: textRender((v: Record<string, unknown>) => {
         if (v['approved'] !== true) {
-          const selected = Array.isArray(v['selected']) ? v['selected'] : []
-          const custom = typeof v['custom'] === 'string' && v['custom'] !== '' ? v['custom'] : null
-          const lines = [
+          return [
             `The user did NOT approve plan ${String(v['planId'])} revision ${String(v['revision'])}`
-              + (selected.length > 0 ? ` (they chose: ${selected.join(', ')})` : ''),
-          ]
-          if (custom !== null) lines.push(`Their feedback: ${custom}`)
-          lines.push('Nothing was approved or committed. Ask what should change, prepare a new revision, and apply again.')
-          return lines.join('\n')
+              + ' (declined, or the approval was withdrawn/cancelled/unavailable).',
+            'Nothing was approved or committed. Ask what should change, prepare a new revision, and apply again.',
+          ].join('\n')
         }
         const commits = (v['commits'] as Array<Record<string, unknown>> | undefined) ?? []
         const failure = v['failure'] as Record<string, unknown> | undefined
@@ -664,6 +664,8 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
         const review = buildPlanReview(plan)
         const decision = await ask({
           ...review,
+          toolName: 'commit_agent_apply_plan',
+          ...(exec.callId === undefined ? {} : { callId: exec.callId }),
           ...(exec.agent === undefined ? {} : { agent: exec.agent }),
           signal: exec.signal as AbortSignal,
         })
@@ -674,8 +676,6 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
             planId: plan.planId,
             revision: plan.revision,
             planDigest: plan.planDigest,
-            selected: [...decision.selected],
-            ...(decision.custom === undefined ? {} : { custom: decision.custom }),
             nextStep: 'Ask the user what should change, prepare a new revision, and call commit_agent_apply_plan again.',
           }
         }
@@ -684,8 +684,8 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
           planId: plan.planId,
           revision: plan.revision,
           planDigest: plan.planDigest,
-          requestId: `plan-review:${plan.planId}:${plan.revision}`,
-          approvedBy: 'user:plan-review',
+          requestId: `approval:${plan.planId}:${plan.revision}`,
+          approvedBy: 'user:approval',
         })
         // The approval is on record; only now may the executor run. Any failure
         // (for example the repository changed since the plan was prepared) is

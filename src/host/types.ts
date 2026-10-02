@@ -61,10 +61,16 @@ export interface HostAgent {
  * Tool execution context (`packages/core/tools/src/index.ts:397`).
  *
  * Verified on a live host: there is no `cwd` member, so the tools never read
- * one. Only `agent` and `signal` are used.
+ * one. Only `agent`, `signal` and `callId` are used.
+ *
+ * `callId` mirrors the host's `ToolRunContext.callId: ToolCallId` — a branded
+ * string (`packages/llm/llm/src/brand.ts:29-31`) that correlates the tool call
+ * in the transcript with the approval panel. The tools forward it verbatim to
+ * the approval request so the client can attach the decision to the exact call.
  */
 export interface HostToolRunContext {
   readonly agent?: HostAgent
+  readonly callId?: string
   readonly signal: { readonly aborted: boolean; throwIfAborted(): void }
 }
 
@@ -177,26 +183,34 @@ export interface HostWorkspaceRegistry {
 }
 
 /**
- * `ctx.userQuestions` (`packages/interaction/user-questions/src/index.ts:65-178`).
- *
- * `ask` is the host-owned human decision surface. The `plan-review` intent makes
- * a capable UI render the plans as a review panel; the answer encoding is the
- * same either way.
+ * One closed outcome of an approval request
+ * (`packages/interaction/user-approval/src/types.ts:32`): a one-shot grant,
+ * explicit rejection, withdrawn request, or unavailable answerer. Callers fail
+ * closed on everything except `'allowed-once'`.
  */
-export interface HostUserQuestionService {
-  ask(request: {
-    readonly questions: ReadonlyArray<{
-      readonly id: string
-      readonly question: string
-      readonly detail?: string
-      readonly header?: string
-      readonly options?: ReadonlyArray<{ readonly label: string; readonly description?: string }>
-      readonly multiSelect?: boolean
-      readonly intent?: { readonly kind: 'plan-review'; readonly approve: string }
-    }>
-    readonly agent?: unknown
+export type HostApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+
+/**
+ * `ctx.approval` (`packages/interaction/user-approval/src/index.ts:150-234`,
+ * registered as `super(ctx, 'approval')`).
+ *
+ * `request` asks the composed answerers for one decision while the requesting
+ * session has an **open turn** — the audit pair (`approval/asked` +
+ * `approval/decided`) must be turn-enclosed, so an idle ask rejects. Tool
+ * execution always runs inside the model's turn, which is exactly why the
+ * approval is requested from the tool path and never from the business API.
+ * `agent` is the live host agent; the plugin passes it through untouched.
+ */
+export interface HostApprovalService {
+  request(request: {
+    readonly agent: unknown
+    readonly toolName: string
+    readonly callId?: string
+    readonly reason?: string
+    /** Localized presentation copy; never persisted in the audit events. */
+    readonly displayReason?: { readonly en: string; readonly [locale: string]: string }
     readonly signal?: AbortSignal
-  }): Promise<{ readonly answers: ReadonlyArray<{ readonly id: string; readonly selected: string[]; readonly custom?: string }> }>
+  }): Promise<HostApprovalOutcome>
 }
 
 /** One child plugin row of a preset composition (`PresetDefinition['plugins']`, definition.ts:5-11). */

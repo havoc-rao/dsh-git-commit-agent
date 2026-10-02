@@ -17,8 +17,9 @@
  * session id is preallocated with a reserved prefix (`SESSION_ID_PREFIX`) so the
  * host half can install the commit tools into exactly that session's scope,
  * instead of registering them globally where every session would see them. The
- * plugin's tools then drive planning, and approval goes through the host's own
- * plan-review panel.
+ * plugin's tools then drive planning, and approval travels as the host's own
+ * `approval/request` event — the host ui-approval package renders it in the
+ * ApprovalPanel, so this client contributes no approval UI of its own.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-git-commit-agent',

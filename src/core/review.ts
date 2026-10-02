@@ -1,14 +1,20 @@
 /**
  * Human approval of one plan revision.
  *
- * The approval prompt is built here as pure data and rendered by the host's own
- * user-questions surface (the `plan-review` intent, which DSH already renders as
- * a plan panel). That matters for two reasons:
+ * The approval document is built here as pure data and handed to the host's
+ * `approval` service by the apply tool (`commit_agent_apply_plan` → the
+ * plugin's `requestPlanApproval` wiring). That matters for two reasons:
  *
- *  - the decision arrives through a host-owned protocol, so the model cannot
+ *  - the decision arrives through a host-owned protocol (`approval/request` →
+ *    `approval/decided` on the agent's session log), so the model cannot
  *    fabricate it — unlike a "confirm" button the plugin would have to trust;
- *  - the text shown to the user is the same content the approval digest covers,
- *    so what is approved is what is displayed.
+ *  - the document shown to the user is derived from the same content the
+ *    approval digest covers, so what is approved is what is displayed.
+ *
+ * The full document travels in the transcript (the `commit_agent_prepare_plan`
+ * tool call already presented it); the approval panel receives only the short
+ * question as its reason, so the reviewer decides against the plan they just
+ * read in chat.
  */
 import type { PlanDeltaEntry, PlanVersion } from './types.js'
 import { statusXy } from './types.js'
