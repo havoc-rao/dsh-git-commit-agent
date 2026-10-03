@@ -25,7 +25,7 @@ import { createInitialisedFixture, git, writeFile } from './helpers/fixture.js'
 function fakeHost(services: Record<string, unknown> = {}): {
   ctx: HostPluginContext
   /** The scope an `agent/created` payload can carry. */
-  scope: { tools: unknown }
+  scope: { tools: unknown; on: (...args: unknown[]) => () => void }
   registered: string[]
   disposed: string[]
   provided: Map<string, unknown>
@@ -75,7 +75,7 @@ function fakeHost(services: Record<string, unknown> = {}): {
   } as unknown as HostPluginContext
   return {
     ctx,
-    scope: { tools },
+    scope: { tools, on: () => () => undefined },
     registered,
     disposed,
     provided,
@@ -163,7 +163,7 @@ test('apply() registers the git-commit agent preset through the agentPresets ser
     assert.equal(definition.order, 30)
     // The capability set arrives from this plugin's host-plane installation,
     // never from composition rows (see `HostPresetDefinition`).
-    assert.deepEqual(definition.plugins, [])
+    assert.deepEqual(definition.plugins, [{ id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs' }])
 
     // The disposer the registry returned is owned by the plugin's teardown.
     host.runEffects()

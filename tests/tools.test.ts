@@ -121,7 +121,7 @@ test('installCommitAgentScope registers all tools, closes the inherited surface 
   assert.deepEqual(registered, [...COMMIT_AGENT_TOOL_NAMES])
   // An empty `allow` is the valid "hide everything inherited" mask. Naming the
   // five here would throw once they are no longer registered globally.
-  assert.deepEqual(restrictions, [{ allow: [] }])
+  assert.deepEqual(restrictions, [{ allow: ['read', 'edit'] }])
   assert.ok(guard !== null)
   const check = guard as unknown as (execution: unknown) => string | undefined
   assert.equal(check({ toolName: 'commit_agent_inspect' }), undefined)

@@ -36,6 +36,7 @@ import {
   type UserApprovalDecision,
   type UserApprovalPrompt,
 } from './host/tools.js'
+import { EditCapabilityController } from './host/edit-capability.js'
 import {
   buildCommitAgentSystemPrompt,
   buildInitialPlanRequest,
@@ -120,7 +121,7 @@ export {
  *
  * The preset appears in the settings roster (AgentPresetSection) and is what
  * dedicated sessions are bound to and recorded under (`meta.agentPreset`). Its
- * composition is empty by design: the commit-agent capability set is installed
+ * composition supplies native filesystem tools only: Git capabilities are installed
  * by this plugin's `agent/created` + session-prefix path, and declaring the
  * plugin as a composition row would double-mount it inside the preset scope and
  * fail the registry's service-leak audit.
@@ -282,7 +283,7 @@ export function createCommitAgentPlugin(
    * Setup that binds a dedicated session to {@link COMMIT_AGENT_PRESET_ID},
    * mirroring the webhook session creator (`webhook/src/session.ts:139-142`).
    *
-   * Binding is metadata plus the standing composition; the five tools arrive
+   * Binding is metadata plus the standing composition; the dedicated tools arrive
    * through the `agent/created` listener regardless, so a missing registry or
    * a failed mount must never fail session creation — the session then simply
    * stays unbound, exactly like before this registration existed.
@@ -588,8 +589,10 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
     },
   })
 
+  const editCapabilities = new EditCapabilityController(plugin.service)
   const deps: ToolDependencies = {
     service: plugin.service,
+    editCapabilities,
     resolveWorkspace: async (agentSessionId) => {
       if (options.resolveWorkspace !== undefined) return await options.resolveWorkspace(agentSessionId)
       // Fall back to the live session's authoritative cwd. The only sessions
@@ -611,7 +614,7 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
   const definitions = buildCommitAgentTools(deps)
 
   /**
-   * Install the five tools into one commit-agent session.s scope.
+   * Install the dedicated tools into one commit-agent session.s scope.
    *
    * `agent/created` is emitted while the agent is being registered — before
    * `agent/session-start` and the first prompt assembly — for both `create` and
@@ -629,8 +632,13 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
     const agentCtx = agent.ctx
     if (agentCtx === undefined) return
     try {
-      installed.set(agent.id, installCommitAgentScope(agentCtx, definitions))
+      installed.set(agent.id, installCommitAgentScope(agentCtx, definitions, {
+        controller: editCapabilities,
+        sessionId: agent.session.id,
+      }))
     } catch (error) {
+      // Installation failure must not leave an ordinary coding tool surface exposed.
+      installed.set(agent.id, agentCtx.tools.guard(() => 'commit agent capability installation failed; denying all tools'))
       ctx.logger?.warn?.(
         `dsh-git-commit-agent: could not install tools for ${agent.id}: `
         + (error instanceof Error ? error.message : String(error)),
@@ -641,6 +649,7 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
     if (agent === undefined) return
     installed.get(agent.id)?.()
     installed.delete(agent.id)
+    editCapabilities.disposeSession(agent.session.id)
   }
   const payloadAgent = (payload: unknown): HostAgent | undefined =>
     (payload as { agent?: HostAgent } | undefined)?.agent
@@ -689,7 +698,9 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
           'Dedicated Git commit planning and execution agent: analyses status and diff, materialises an exact '
           + 'add/commit plan, binds your approval to one plan revision, and runs a restricted git executor.',
         order: 30,
-        plugins: [],
+        // Tool-only standing contribution: reuses host fs and observation policy,
+        // never remounts this plugin's service inside the preset.
+        plugins: [{ id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs' }],
       })
       .then((dispose) => {
         if (retired) {
@@ -734,6 +745,7 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
   ctx.effect?.(() => () => {
     for (const dispose of installed.values()) dispose()
     installed.clear()
+    editCapabilities.dispose()
     void plugin.dispose()
   })
 

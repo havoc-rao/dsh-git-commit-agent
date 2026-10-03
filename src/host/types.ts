@@ -84,6 +84,8 @@ export interface HostToolRegistry {
 /** A scoped context exposing the tool registry (an agent's `ctx`). */
 export interface HostScopedContext {
   readonly tools: HostToolRegistry
+  /** Scoped Harness around-dispatch waterfall; awaits next through native completion. */
+  on?(event: 'tools/execute', listener: (execution: unknown, next: () => Promise<unknown>) => Promise<unknown>): () => void
 }
 
 /** Agent handle returned by `AgentRegistry.create` / `resume`. */

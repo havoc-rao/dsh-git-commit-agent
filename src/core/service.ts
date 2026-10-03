@@ -7,6 +7,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { GitCommitError, asGitCommitError } from './errors.js'
@@ -148,6 +149,8 @@ export class CommitAgentService {
   private readonly newId: () => string
   private readonly running = new Map<string, RunningExecution>()
   private readonly starting = new Set<string>()
+  /** Shared in-process exclusion for native edits and Git executions across tasks. */
+  private readonly workspaceOperations = new Set<string>()
   private readonly runners = new Map<string, GitRunner>()
   private readonly locks: WorktreeLock
 
@@ -629,6 +632,9 @@ export class CommitAgentService {
         requestedRevision: input.revision,
       })
     }
+    if (plan.status === 'stale') {
+      throw new GitCommitError('PLAN_STALE', 'this plan was invalidated; prepare a new revision before approval')
+    }
     const digest = computePlanDigest(plan)
     if (digest !== plan.planDigest) {
       throw new GitCommitError('APPROVAL_MISMATCH', 'stored plan digest does not match its content', { planId: plan.planId })
@@ -663,6 +669,50 @@ export class CommitAgentService {
     return await this.store.patchPlan(taskId, planId, revision, { approval: null, status: 'draft' })
   }
 
+  /** Canonical workspace identity; aliases must not evade the operation lease. */
+  private workspaceKey(worktreePath: string): string {
+    return realpathSync(worktreePath)
+  }
+
+  /** Acquire a lease held until the entire native edit or Git execution settles. */
+  acquireWorkspaceEdit(worktreePath: string): () => void {
+    const key = this.workspaceKey(worktreePath)
+    if (this.workspaceOperations.has(key)) {
+      throw new GitCommitError('EXECUTION_IN_PROGRESS', 'this worktree already has an edit or Git execution in progress')
+    }
+    this.workspaceOperations.add(key)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.workspaceOperations.delete(key)
+    }
+  }
+
+  /** Used for fail-closed synchronous native-tool guards. */
+  isWorkspaceBusy(worktreePath: string): boolean {
+    return this.workspaceOperations.has(this.workspaceKey(worktreePath))
+  }
+
+  /** Successful editing revokes old plan approvals even if bytes are later restored. */
+  async invalidatePlansAfterEdit(taskId: string): Promise<void> {
+    const target = await this.taskTarget(taskId)
+    const key = this.workspaceKey(target.worktreePath)
+    for (const task of await this.store.listTasks()) {
+      if (resolve(task.target.worktreePath) !== resolve(target.worktreePath)) {
+        let otherKey: string
+        try { otherKey = this.workspaceKey(task.target.worktreePath) } catch { continue }
+        if (otherKey !== key) continue
+      }
+      const stored = await this.requireTask(task.taskId)
+      for (const plan of stored.plans) {
+        if (plan.status === 'draft' || plan.status === 'ready') {
+          await this.store.patchPlan(task.taskId, plan.planId, plan.revision, { status: 'stale', approval: null })
+        }
+      }
+    }
+  }
+
   /** Execute an approved plan revision. */
   async executePlan(input: {
     taskId: string
@@ -686,6 +736,7 @@ export class CommitAgentService {
     }
     // Claim the task synchronously so two concurrent calls cannot both pass the
     // check above before either registers its run.
+    const releaseWorkspace = this.acquireWorkspaceEdit(stored.task.target.worktreePath)
     this.starting.add(input.taskId)
     let runner: GitRunner
     try {
@@ -767,6 +818,7 @@ export class CommitAgentService {
     } finally {
       this.starting.delete(input.taskId)
       this.running.delete(input.taskId)
+      releaseWorkspace()
     }
   }
 
@@ -802,6 +854,11 @@ export class CommitAgentService {
       })
     }
     return result
+  }
+
+  /** Bound worktree without capturing a new snapshot. */
+  async taskTarget(taskId: string): Promise<CommitTask['target']> {
+    return (await this.requireTask(taskId)).task.target
   }
 
   /** Every plan of one task. */

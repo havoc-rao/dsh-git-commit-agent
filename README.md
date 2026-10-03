@@ -72,7 +72,7 @@ ctx.agentPresets.register({
   id: 'git-commit',          // COMMIT_AGENT_PRESET_ID
   name: 'Git Commit Agent',
   order: 30,
-  plugins: [],               // deliberate — see below
+  plugins: [{ id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs' }],
 })
 ```
 
@@ -87,8 +87,8 @@ definition cannot drift from this plugin's code. What it buys:
   `agentPresets.mount(agentCtx, 'git-commit')` and the session header records
   `agentPreset: git-commit`, exactly like DSH's webhook session creator.
 
-The composition is **empty by design**: the commit agent's capability set
-arrives from this plugin's host-plane installation (`agent/created` +
+The composition supplies **only the official native filesystem tools**. Git capabilities
+arrive from this plugin's host-plane installation (`agent/created` +
 `session-git-commit-` prefix + `restrict`/`guard`), so the preset must not
 declare `dsh-git-commit-agent` as a composition row — that would mount a second
 plugin instance inside the preset scope (a second service, shared store, races)
@@ -101,9 +101,10 @@ while the registration promise is pending. Minimal embedders without `inject`
 retain the one-shot lookup fallback. A successful registration logs
 `dsh-git-commit-agent: preset git-commit registered`.
 
-**Current limitation:** the roster entry has an empty composition. Selecting it
-for an ordinary session does not install the commit tools: tool installation
-still requires the dedicated session-id prefix. Do not treat this entry as a
+**Current limitation:** selecting this preset for an ordinary session does not
+install the Git-specific tools or the dedicated authorization scope: that
+installation still requires the dedicated session-id prefix. The ordinary
+session receives the preset's native filesystem tools under normal host policy. Do not treat this entry as a
 complete, independently usable default agent preset. A future composition entry
 must supply the tools and prompt by preset scope rather than by session id.
 
@@ -168,6 +169,43 @@ Implementation: the schema field and the admission-time resolution live in
 `src/config.ts` owns the tolerant validator, and `client/client.js` owns the
 catalog picker and the `selectModel` application.
 
+## Dynamic native editing (fixed tool surface)
+
+Commit sessions declare the Git tools plus native `read` and `edit` from their
+first model request. `commit_agent_request_edit` changes host-owned authorization,
+not tool schemas or system prompts, preserving the unchanged request prefix for
+provider prompt caching (actual cache hits depend on the provider).
+
+When planning reveals a necessary correction:
+
+1. Inspect the bound worktree.
+2. Call `commit_agent_request_edit` with exact repository-relative existing file
+   `paths` and a `reason`; the host asks the user through its approval service.
+3. Use native `read` before `edit`, even if `commit_agent_read_files` already read
+   the file. Only explicitly approved files can be edited.
+4. Inspect again, prepare a new plan revision, and obtain fresh commit approval.
+
+`action=status` lists grants; `action=revoke` clears them. Grants are ephemeral,
+scoped to the current agent session, and never restored after restart/disposal.
+Editing authorization never approves a Git commit. An authorized edit attempt
+invalidates earlier ready/draft plans and their approvals, conservatively even
+if the edit fails or is cancelled. Native operations and Git execution share an
+in-process worktree lease, held through asynchronous completion.
+
+This plugin reuses the host's native tools; it does not implement an editor or
+bypass filesystem policy. The deployment must provide inherited native `read`
+and `edit`, a confined filesystem provider, and `fs-observation-policy`. Native
+edits remain subject to those host policies. Missing tools fail installation
+closed; missing scoped execution interception prevents edit authorization.
+No shell, `write`, network or delegation capability is added.
+
+Both native reads and edits reject out-of-worktree paths, Git metadata,
+sensitive credential files, symlinks and non-regular/missing files. Permission
+escalation arguments are rejected. Validation is repeated at dispatch; the
+in-process lease does not lock external editors or other processes, and path
+checks and the host's sandbox containment are not a kernel security boundary;
+adversarial concurrent filesystem path swaps remain outside this threat model.
+
 ## Tools exposed to the dedicated agent
 
 | Tool | Purpose |
@@ -177,6 +215,8 @@ catalog picker and the `selectModel` application.
 | `commit_agent_read_files` | the single file reader: bounded contents of specific repository paths; secrets and binaries excluded with a reason |
 | `commit_agent_prepare_plan` | prepare a new immutable plan revision; the host validates, computes every expected tree, returns the preview |
 | `commit_agent_apply_plan` | submit one revision to the human's plan-review panel and, once approved, execute it; the host verifies approval, digest, snapshot and staged tree |
+| `commit_agent_request_edit` | request user authorization for exact existing files, list current grants, or revoke them |
+| Native `read` / `edit` | host-provided file observation and literal editing; edit is locked until a matching user grant exists |
 
 There is no shell, no arbitrary git invocation, no `cwd`, no file write, no
 network and no delegation tool.

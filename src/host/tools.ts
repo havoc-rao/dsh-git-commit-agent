@@ -2,7 +2,7 @@
  * Model-facing tools.
  *
  * The tool set is deliberately tiny and closed: there is no general shell, no
- * arbitrary git invocation, no `cwd` parameter, no file write and no network or
+ * arbitrary git invocation, no `cwd` parameter, no arbitrary file write and no network or
  * delegation tool. Every git argument is constructed by the host, and paths are
  * validated against the bound worktree.
  *
@@ -27,6 +27,7 @@
  * dependency on `@deepseek-ai/dsh-tools`. The shape is the one the host's
  * `tools.register` requires (verified in P0).
  */
+import { EditCapabilityController } from './edit-capability.js'
 import { asGitCommitError, GitCommitError, type GitCommitErrorCode } from '../core/errors.js'
 import type { CommitAgentService } from '../core/service.js'
 import { buildPlanReview } from '../core/review.js'
@@ -41,7 +42,7 @@ import type { ContentBlock, HostScopedContext, HostToolDefinition, HostToolRunCo
  * an agent's own `agent.ctx` is visible only to that agent. The GitLens button
  * cannot create an agent host-side (that needs `AgentRegistry.create`), so it
  * preallocates an id with this prefix through `ISessions.create({ sessionId })`
- * and the host half installs the five tools into exactly those agent scopes.
+ * and the host half installs the dedicated tools into exactly those agent scopes.
  *
  * Kept in sync by hand with `client/client.js` (the client bundle cannot import
  * this module); `tests/client.test.ts` locks the two constants together.
@@ -60,6 +61,7 @@ export const COMMIT_AGENT_TOOL_NAMES = [
   'commit_agent_read_files',
   'commit_agent_prepare_plan',
   'commit_agent_apply_plan',
+  'commit_agent_request_edit',
 ] as const
 
 /** One of the tool names. */
@@ -68,6 +70,8 @@ export type CommitAgentToolName = (typeof COMMIT_AGENT_TOOL_NAMES)[number]
 /** Host callbacks the tools need but the service does not own. */
 export interface ToolDependencies {
   readonly service: CommitAgentService
+  /** Shared ephemeral controller, also supplied to the scoped installer. */
+  readonly editCapabilities?: EditCapabilityController
   /** Worktree bound to a dedicated agent session (its cwd at open time). */
   resolveWorkspace(agentSessionId: string): Promise<string | null>
   /** Source coding session that dispatched the task, when known. */
@@ -211,7 +215,15 @@ async function requireTaskId(deps: ToolDependencies, exec: HostToolRunContext): 
     throw new GitCommitError('BAD_ARGUMENT', 'this tool requires an initiating agent session')
   }
   const existing = await deps.service.taskIdForAgentSession(agentSessionId)
-  if (existing !== null) return existing
+  if (existing !== null) {
+    if (deps.editCapabilities !== undefined) {
+      const target = await deps.service.taskTarget(existing)
+      const workspace = await deps.resolveWorkspace(agentSessionId)
+      if (workspace === null) throw new GitCommitError('BAD_ARGUMENT', 'no workspace is bound to this session')
+      deps.editCapabilities.bindSession(agentSessionId, existing, target.worktreePath, workspace)
+    }
+    return existing
+  }
   const workspace = await deps.resolveWorkspace(agentSessionId)
   if (workspace === null) {
     throw new GitCommitError('BAD_ARGUMENT', 'no git worktree is bound to this session yet')
@@ -221,6 +233,7 @@ async function requireTaskId(deps: ToolDependencies, exec: HostToolRunContext): 
     agentSessionId,
     workspaceRoot: workspace,
   })
+  deps.editCapabilities?.bindSession(agentSessionId, state.task.taskId, state.task.target.worktreePath, workspace)
   return state.task.taskId
 }
 
@@ -230,7 +243,7 @@ function failure(error: unknown): never {
   throw e
 }
 
-/** Build the five tool definitions bound to one service. */
+/** Build the dedicated tool definitions bound to one service. */
 export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinition[] {
   const { service } = deps
 
@@ -723,7 +736,41 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
     },
   }
 
-  return [inspect, diff, readFiles, preparePlan, applyPlan]
+  const requestEdit: HostToolDefinition = {
+    name: 'commit_agent_request_edit',
+    description: 'Ask the user for a revokable, session-only grant to edit exact existing repository files using the native edit tool. No file is modified by this request. Secrets, Git metadata, symlinks and paths outside this worktree are prohibited. action=revoke removes all grants; action=status lists current grants. Grants are not restored after session restart.',
+    parameters: parameters({
+      action: enumProp('request (default), revoke all grants, or status.', ['request', 'revoke', 'status']),
+      paths: arrayProp('Exact repository-relative existing regular files to authorize (request only, max 40).', { type: 'string' }),
+      reason: stringProp('Explain the intended changes to the user (required for request).'),
+    }),
+    output: { schema: { type: 'object' }, render: textRender((v: Record<string, unknown>) => JSON.stringify(v)) },
+    async execute(args, exec): Promise<unknown> {
+      const a = args as { action?: string; paths?: unknown; reason?: unknown }
+      await requireTaskId(deps, exec)
+      const controller = deps.editCapabilities
+      if (controller === undefined) throw new GitCommitError('BAD_ARGUMENT', 'native editing authorization is unavailable on this host')
+      const sessionId = exec.agent!.session.id
+      const action = a.action ?? 'request'
+      if (action === 'revoke') { controller.revoke(sessionId); return { approved: false, revoked: true, paths: [] } }
+      if (action === 'status') return { paths: controller.status(sessionId) }
+      if (action !== 'request') throw new GitCommitError('BAD_ARGUMENT', 'unknown edit authorization action')
+      if (typeof a.reason !== 'string' || a.reason.trim() === '' || a.reason.length > 4000) throw new GitCommitError('BAD_ARGUMENT', 'a non-empty reason of at most 4000 characters is required')
+      const request = controller.prepareRequest(sessionId, a.paths)
+      if (deps.askUserApproval === undefined) throw new GitCommitError('BAD_ARGUMENT', 'interactive edit approval is unavailable')
+      const question = `Allow this session to edit ONLY these existing repository files?\n${request.paths.map(p => `- ${p}`).join('\n')}\n\nReason: ${a.reason}\n\nThis revokable grant lasts until revoked or this session is disposed; no other files or permission escalation are authorized.`
+      const decision = await deps.askUserApproval({
+        toolName: 'commit_agent_request_edit', header: 'Authorize exact-file editing', question, detail: question,
+        approveLabel: 'Allow these files', declineLabel: 'Decline',
+        ...(exec.callId === undefined ? {} : { callId: exec.callId }),
+        ...(exec.agent === undefined ? {} : { agent: exec.agent }), signal: exec.signal as AbortSignal,
+      })
+      if (!decision.approved || exec.signal.aborted) return { approved: false, paths: request.paths }
+      request.grant()
+      return { approved: true, paths: request.paths, nextStep: 'Use native read and edit for these exact files; inspect again before preparing a new commit plan.' }
+    },
+  }
+  return [inspect, diff, readFiles, preparePlan, applyPlan, requestEdit]
 }
 
 /** Error codes that the model is allowed to see verbatim. */
@@ -754,7 +801,7 @@ export function isExposableCode(code: string): boolean {
 }
 
 /**
- * Install the five tools into one agent's own scope.
+ * Install the dedicated tools into one agent's own scope.
  *
  * This is the ONLY place the tools become visible. Registering on the agent
  * scope (rather than the plugin's root context) is what keeps them out of every
@@ -764,13 +811,12 @@ export function isExposableCode(code: string): boolean {
  * The registration is paired with two guards so the surface stays closed even
  * though scoped registrations are exempt from `restrict`:
  *
- *  - `restrict({ allow: [] })` filters the whole **inherited** surface (the
- *    global layer plus every preset/standing ancestor layer) down to nothing.
- *    An empty `allow` is valid — only `{}` with both sides undefined is
- *    rejected — and it is why the five do not have to be global: naming them in
- *    `allow` would fail once they are no longer registered globally.
- *  - the terminal `guard` allow-lists the five by name and fails closed on an
- *    execution record it cannot read.
+ *  - `restrict({ allow: ['read', 'edit'] })` fixes the inherited native surface
+ *    at installation; missing native tools fail installation with rollback.
+ *  - the terminal synchronous guard allow-lists Git tools and validates native
+ *    file paths and ephemeral grants. The scoped tools/execute wrapper holds
+ *    the shared workspace lease through the actual async native operation.
+ *    Editing fails closed when the host provides no around-execution pipeline.
  *
  * @param agentCtx - the target agent's scoped context (`agent.ctx`).
  * @param definitions - the definitions built by {@link buildCommitAgentTools}.
@@ -779,23 +825,40 @@ export function isExposableCode(code: string): boolean {
 export function installCommitAgentScope(
   agentCtx: HostScopedContext,
   definitions: readonly HostToolDefinition[],
+  options?: { readonly controller: EditCapabilityController; readonly sessionId: string },
 ): () => void {
   const allowed = new Set<string>(COMMIT_AGENT_TOOL_NAMES)
   const disposers: Array<() => void> = []
-  for (const definition of definitions) {
-    disposers.push(agentCtx.tools.register(definition))
+  const cleanup = (): void => {
+    options?.controller.disposeSession(options.sessionId)
+    for (const dispose of disposers.splice(0).reverse()) { try { dispose() } catch { /* finish rollback */ } }
   }
-  disposers.push(agentCtx.tools.restrict({ allow: [] }))
-  disposers.push(
-    agentCtx.tools.guard((execution: unknown) => {
+  try {
+    // Restrict validates inherited native names. Missing read/edit throws: no
+    // substitute implementation or hidden fallback is registered.
+    disposers.push(agentCtx.tools.restrict({ allow: ['read', 'edit'] }))
+    disposers.push(agentCtx.tools.guard((execution: unknown) => {
       const name = toolNameOfExecution(execution)
       if (name === null) return 'commit agent guard: could not determine the tool name; denying'
+      if (name === 'read' || name === 'edit') {
+        return options === undefined ? 'commit agent: native file authorization unavailable' : options.controller.guard(execution, options.sessionId)
+      }
       return allowed.has(name) ? undefined : `commit agent scope: ${name} is not permitted`
-    }),
-  )
-  return () => {
-    for (const dispose of disposers.reverse()) dispose()
-  }
+    }))
+    if (options !== undefined && agentCtx.on !== undefined) {
+      disposers.push(agentCtx.on('tools/execute', async (execution, next) => {
+        const name = toolNameOfExecution(execution)
+        if (name !== 'read' && name !== 'edit') return await next()
+        return await options.controller.around(execution, options.sessionId, next)
+      }))
+      disposers.push(options.controller.attachPipeline(options.sessionId))
+    }
+    for (const definition of definitions) {
+      if (!allowed.has(definition.name)) throw new Error(`unexpected commit agent tool ${definition.name}`)
+      disposers.push(agentCtx.tools.register(definition))
+    }
+  } catch (error) { cleanup(); throw error }
+  return cleanup
 }
 
 /**
