@@ -97,6 +97,29 @@ browser refresh alone cannot replace host code). Do not start another server to
 update the original GUI. Authenticated browser rendering remains a separate
 manual check when this agent has no browser session/cookie.
 
+## Command palette modes
+
+The command palette offers two independent actions (search `commit` / `提交`):
+
+- **在当前工作区启动 Commit Agent / Start Commit Agent in Current Workspace**:
+  keeps the original behavior — creates a dedicated session in the current
+  registered workspace, installs the plugin's restricted tools, applies the
+  configured default model, and submits the planning request.
+- **将提交规划 prompt 填入当前会话 / Fill Commit Planning Prompt in Current Session**:
+  fills and focuses the current session input box only. Review/edit the prompt
+  and send it manually. It does not create or navigate to another session,
+  change the model/preset, install tools, or automatically submit. The prompt
+  follows the configured prompt language and asks the agent to use its existing
+  tools to inspect changes, propose commit groups, and wait for explicit approval
+  before staging/committing. This is an ordinary agent conversation, **not** the
+  plugin's revision/digest-bound approval and restricted executor workflow.
+
+Both actions require the current main-view session to belong to a registered
+workspace. Input mode refuses to replace existing text, inline references or
+attachments, or a composer in a non-plain admission phase; send/clear the draft
+first. Existing session capabilities are preserved, not replaced with a new tool
+surface (including when the current session is already a dedicated commit agent).
+
 ## Prerequisites
 
 - **A default model, or an explicit one.** The dedicated session drives a real

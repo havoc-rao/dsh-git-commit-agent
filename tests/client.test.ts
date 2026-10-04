@@ -1522,6 +1522,7 @@ async function paletteHarness() {
   let current = 'source'
   let items = [{ workspaceId: 'ws', path: '/repo', sessionIds: ['source'] }]
   let command: any
+  const commands: any[] = []
   const listeners = new Set<() => void>()
   const cleanups: Array<() => void> = []
   let removed = 0
@@ -1535,7 +1536,7 @@ async function paletteHarness() {
   sessions.list = store(() => ({ byId: { current: { id: current, retainedBy: { mainView: 1 } } } }))
   get('workspaces').list = store(() => ({ items }))
   const palette = {
-    registerCommand(value: any) { command = value; return () => { removed += 1 } },
+    registerCommand(value: any) { commands.push(value); command ??= value; return () => { removed += 1 } },
     getSnapshot() { return { mode: 'commands' } },
     refresh() { refreshes += 1 },
   }
@@ -1551,7 +1552,7 @@ async function paletteHarness() {
   assert.equal(command, undefined, 'optional contribution waits for palette service')
   activate!()
   return {
-    harness, command: command as any, listeners, localeListeners,
+    harness, command: command as any, inputCommand: commands[1], listeners, localeListeners,
     setLocale(value: string) { activeLocale = value; localeListeners.forEach(fn => fn()) },
     change(id: string) { current = id; listeners.forEach(fn => fn()) },
     remove() { items = [] },
@@ -1569,7 +1570,7 @@ test('palette registers optional current-workspace action and owns cleanup/refre
   assert.ok(p.command.describe().disabledReason)
   assert.equal(p.refreshes, 1) // shared listener refreshes command availability
   p.cleanup(); p.cleanup()
-  assert.equal(p.removed, 1)
+  assert.equal(p.removed, 2)
   assert.equal(p.listeners.size, 0)
 })
 
@@ -1618,6 +1619,69 @@ test('palette starts dedicated workspace session and rechecks missing/aborted ta
   controller.abort()
   assert.equal((await p.command.target.execute({ signal: controller.signal })).kind, 'cancelled')
   assert.equal(p.harness.created.length, 1)
+  p.cleanup()
+})
+
+test('palette fills the active composer with a tool-agnostic prompt without creating or sending', async () => {
+  const p = await paletteHarness()
+  const get = p.harness.ctx['get'] as (name: string) => any
+  let focused = 0
+  let scoped = ''
+  const resolve = get('conversation').input.for
+  get('conversation').input.for = (scope: any) => {
+    scoped = scope.sessionId
+    return { ...resolve(scope), focus() { focused += 1 } }
+  }
+  get('sessions').create = undefined // this mode does not require session creation
+  assert.equal(p.inputCommand.id, 'dsh-git-commit-agent.fill-current-session')
+  assert.equal(p.inputCommand.describe().disabledReason, undefined)
+  assert.equal(p.inputCommand.describe().title, '将提交规划 prompt 填入当前会话')
+  const signal = new AbortController().signal
+  assert.equal((await p.inputCommand.target.execute({ signal })).kind, 'completed')
+  assert.equal(scoped, 'source')
+  assert.equal(focused, 1)
+  assert.equal(p.harness.created.length, 0)
+  assert.equal(p.harness.opened.length, 0)
+  assert.equal(p.harness.modelSelections.length, 0)
+  assert.equal(p.harness.submits, 0)
+  assert.match(p.harness.drafts[0]!, /worktree: \/repo/)
+  assert.match(p.harness.drafts[0]!, /当前会话已有的工具/)
+  assert.match(p.harness.drafts[0]!, /等待我明确批准/)
+  assert.doesNotMatch(p.harness.drafts[0]!, /commit_agent_|changeId|审批面板/)
+  p.setLocale('en')
+  assert.equal(p.inputCommand.describe().title, 'Fill Commit Planning Prompt in Current Session')
+  await p.inputCommand.target.execute({ signal })
+  assert.match(p.harness.drafts[1]!, /tools already available/)
+  assert.match(p.harness.drafts[1]!, /wait for my explicit approval/)
+  p.cleanup()
+})
+
+test('palette input mode refuses unavailable, occupied and cancelled composers', async () => {
+  const p = await paletteHarness()
+  const get = p.harness.ctx['get'] as (name: string) => any
+  const resolver = get('conversation').input
+  const resolve = resolver.for
+  const signal = new AbortController().signal
+  for (const state of [
+    { draft: 'keep me', phase: 'plain' },
+    { draft: '', attachmentIds: ['attachment'], phase: 'plain' },
+    { draft: '', occurrences: [{}], phase: 'plain' },
+    { draft: '', phase: 'submitting' },
+  ]) {
+    resolver.for = (scope: any) => ({ ...resolve(scope), state: { getSnapshot: () => state } })
+    assert.equal((await p.inputCommand.target.execute({ signal })).kind, 'failed')
+  }
+  resolver.for = () => undefined
+  assert.ok(p.inputCommand.describe().disabledReason)
+  assert.equal((await p.inputCommand.target.execute({ signal })).kind, 'failed')
+  resolver.for = resolve
+  p.change('ungrouped')
+  assert.ok(p.inputCommand.describe().disabledReason)
+  assert.equal((await p.inputCommand.target.execute({ signal })).kind, 'failed')
+  const controller = new AbortController()
+  controller.abort()
+  assert.equal((await p.inputCommand.target.execute({ signal: controller.signal })).kind, 'cancelled')
+  assert.equal(p.harness.drafts.length, 0)
   p.cleanup()
 })
 

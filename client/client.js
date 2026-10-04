@@ -271,6 +271,33 @@ window.__ModuleLoader__.load({
       return lines.join('\n')
     }
 
+    /** Tool-agnostic request for an ordinary session; no plugin tool/approval contract. */
+    function buildCurrentSessionPrompt(worktree, language) {
+      return (language === 'en' ? [
+        'Plan commits for this worktree using the tools already available in this session.',
+        'worktree: ' + worktree,
+        '',
+        'Requirements:',
+        '1. Read the real Git status, staged and unstaged diffs, and untracked file contents. Never infer changes from paths or memory.',
+        '2. Group changes into small, logically coherent commits. Show the files, rationale and proposed commit message for each group; explain any exclusions.',
+        '3. Preserve existing staged content and include it in the first proposed commit. Include unstaged and untracked changes in the plan; do not ask me to run git add first.',
+        '4. Present the plan and wait for my explicit approval before staging or committing. If I decline, revise the plan and ask again. Never claim approval yourself.',
+        '5. After approval, recheck the actual changes. If they differ from the approved plan, stop and ask for approval again. Stage only approved changes; never discard unrelated work, amend commits or push unless separately requested.',
+        '6. Verify the resulting commits and remaining Git status, then report the outcome. Present all analysis, explanations, commit messages and progress in English.',
+      ] : [
+        '请使用当前会话已有的工具，为这个 worktree 规划提交。',
+        'worktree: ' + worktree,
+        '',
+        '要求：',
+        '1. 读取真实 Git 状态、已暂存与未暂存 diff，以及未跟踪文件内容，不要从路径或记忆猜测改动。',
+        '2. 按逻辑拆分为小而完整的提交，逐个展示文件、拆分理由和建议提交信息；说明未纳入的变更及原因。',
+        '3. 保留已有暂存内容，并将其纳入第一个建议提交。未暂存改动与未跟踪文件也要纳入计划，不要要求我先手动 git add。',
+        '4. 展示计划后等待我明确批准，再暂存或提交；若我拒绝，修改计划并重新确认，不要自行声称我已批准。',
+        '5. 批准后重新检查真实改动；如与批准的计划不同，停止并重新请求批准。只暂存已批准的改动，不丢弃无关工作，未经单独要求不要 amend 或 push。',
+        '6. 核验提交结果与剩余 Git 状态并汇报。所有分析、计划说明、提交信息和进度汇报均使用中文。',
+      ]).join('\n')
+    }
+
     /** Prompt-language preference field name; mirrors `src/config.ts`. */
     const PROMPT_LANGUAGE_FIELD = 'promptLanguage'
     /** Default-model preference field name; mirrors `src/config.ts`. */
@@ -462,19 +489,38 @@ window.__ModuleLoader__.load({
 
     /** Current target comes from public stores, never palette context or DOM focus. */
     function currentCommitWorkspace(ctx) {
-      const sessions = service(ctx, 'sessions')
       const workspaces = service(ctx, 'workspaces')
-      const sessionSnapshot = sessions && sessions.list && sessions.list.getSnapshot()
       const workspaceSnapshot = workspaces && workspaces.list && workspaces.list.getSnapshot()
-      const current = Object.values(sessionSnapshot && sessionSnapshot.byId || {}).find(function (row) {
-        return row && row.retainedBy && row.retainedBy.mainView > 0
-      })
+      const current = currentCommitSession(ctx)
       if (!current) return undefined
       return (workspaceSnapshot && workspaceSnapshot.items || []).find(function (row) {
         return row && typeof row.path === 'string' && row.path !== ''
           && Array.isArray(row.sessionIds) && row.sessionIds.includes(current.id)
       })
     }
+
+    function currentCommitSession(ctx) {
+      const sessions = service(ctx, 'sessions')
+      const snapshot = sessions && sessions.list && sessions.list.getSnapshot()
+      return Object.values(snapshot && snapshot.byId || {}).find(function (row) {
+        return row && row.retainedBy && row.retainedBy.mainView > 0
+      })
+    }
+
+    function currentCommitInput(ctx) {
+      const current = currentCommitSession(ctx)
+      const sessions = service(ctx, 'sessions')
+      const conversation = service(ctx, 'conversation')
+      if (!current || !sessions || typeof sessions.scope !== 'function'
+        || !conversation || !conversation.input || typeof conversation.input.for !== 'function') return undefined
+      const scope = sessions.scope(current.id)
+      return scope === undefined ? undefined : conversation.input.for(scope)
+    }
+
+    const CURRENT_PROMPT_TITLES = Object.freeze({
+      zh: '将提交规划 prompt 填入当前会话',
+      en: 'Fill Commit Planning Prompt in Current Session',
+    })
 
     // Pure descriptor data: no palette runtime dependency or React icons.
     const COMMIT_PALETTE_TITLES = Object.freeze({
@@ -497,11 +543,19 @@ window.__ModuleLoader__.load({
         missing: 'The current session has no registered workspace',
         unavailable: 'Session creation is unavailable',
         completed: 'Commit planning session created',
+        inputTitle: CURRENT_PROMPT_TITLES.en,
+        inputUnavailable: 'The current session input is unavailable',
+        inputOccupied: 'The input already has a draft or attachments; send or clear them first',
+        inputCompleted: 'Commit planning prompt filled in; review and send when ready',
       } : {
         title: COMMIT_PALETTE_TITLES.zh, category: 'Git',
         missing: '当前会话没有所属的已注册工作区',
         unavailable: '当前宿主无法创建会话',
         completed: '已创建提交规划会话',
+        inputTitle: CURRENT_PROMPT_TITLES.zh,
+        inputUnavailable: '当前会话输入框不可用',
+        inputOccupied: '输入框已有草稿或附件，请先发送或清空',
+        inputCompleted: '已填入提交规划 prompt，请检查后手动发送',
       }
     }
 
@@ -553,6 +607,46 @@ window.__ModuleLoader__.load({
               } catch (error) {
                 return args.signal.aborted ? { kind: 'cancelled' }
                   : { kind: 'failed', message: error instanceof Error ? error.message : String(error) }
+              }
+            },
+          },
+        }))
+        const inputDenied = function () {
+          if (!currentCommitWorkspace(ctx)) return paletteCopy(ctx).missing
+          const input = currentCommitInput(ctx)
+          if (!input || typeof input.setDraft !== 'function') return paletteCopy(ctx).inputUnavailable
+        }
+        disposers.push(palette.registerCommand({
+          id: 'dsh-git-commit-agent.fill-current-session',
+          describe: function () {
+            const copy = paletteCopy(ctx)
+            return {
+              title: copy.inputTitle, category: copy.category,
+              localizedTitles: CURRENT_PROMPT_TITLES, pluginTag: COMMIT_PALETTE_TAG,
+              iconId: 'git', aliases: ['commit', 'prompt', 'git', '提交', '当前会话', 'inputbox'],
+              disabledReason: inputDenied(),
+            }
+          },
+          target: {
+            kind: 'action',
+            execute: async function (args) {
+              if (args.signal.aborted) return { kind: 'cancelled' }
+              try {
+                const reason = inputDenied()
+                if (reason) return { kind: 'failed', message: reason }
+                const target = currentCommitWorkspace(ctx)
+                const input = currentCommitInput(ctx)
+                const state = input.state && typeof input.state.getSnapshot === 'function' && input.state.getSnapshot()
+                if (state && (state.draft || state.attachmentIds && state.attachmentIds.length
+                  || state.occurrences && state.occurrences.length || state.phase && state.phase !== 'plain')) {
+                  return { kind: 'failed', message: paletteCopy(ctx).inputOccupied }
+                }
+                if (args.signal.aborted) return { kind: 'cancelled' }
+                input.setDraft(buildCurrentSessionPrompt(target.path, promptLanguageFor(ctx)))
+                if (typeof input.focus === 'function') input.focus()
+                return { kind: 'completed', message: paletteCopy(ctx).inputCompleted }
+              } catch (error) {
+                return { kind: 'failed', message: error instanceof Error ? error.message : String(error) }
               }
             },
           },
