@@ -1507,7 +1507,18 @@ test('cold Inspector fetches the source snapshot without any display session', a
 
 async function paletteHarness() {
   const { exports } = await loadBundle()
-  const harness = fakeCtx({ workspaces: [{ workspaceId: 'ws', path: '/repo' }] })
+  let activeLocale = 'zh-CN'
+  const localeListeners = new Set<() => void>()
+  const harness = fakeCtx({
+    workspaces: [{ workspaceId: 'ws', path: '/repo' }],
+    locale: {
+      getSnapshot: () => ({ active: activeLocale }),
+      subscribe(listener: () => void) {
+        localeListeners.add(listener)
+        return () => { localeListeners.delete(listener) }
+      },
+    },
+  })
   let current = 'source'
   let items = [{ workspaceId: 'ws', path: '/repo', sessionIds: ['source'] }]
   let command: any
@@ -1540,7 +1551,8 @@ async function paletteHarness() {
   assert.equal(command, undefined, 'optional contribution waits for palette service')
   activate!()
   return {
-    harness, command: command as any, listeners,
+    harness, command: command as any, listeners, localeListeners,
+    setLocale(value: string) { activeLocale = value; localeListeners.forEach(fn => fn()) },
     change(id: string) { current = id; listeners.forEach(fn => fn()) },
     remove() { items = [] },
     cleanup() { cleanups.forEach(fn => fn()) },
@@ -1559,6 +1571,39 @@ test('palette registers optional current-workspace action and owns cleanup/refre
   p.cleanup(); p.cleanup()
   assert.equal(p.removed, 1)
   assert.equal(p.listeners.size, 0)
+})
+
+test('palette exposes bilingual plugin tag, titles and semantic action icon dynamically', async () => {
+  const p = await paletteHarness()
+  const zh = p.command.describe()
+  assert.equal(zh.title, '在当前工作区启动 Commit Agent')
+  assert.deepEqual(zh.localizedTitles, {
+    zh: '在当前工作区启动 Commit Agent', en: 'Start Commit Agent in Current Workspace',
+  })
+  assert.deepEqual(zh.pluginTag, {
+    id: 'dsh-git-commit-agent', title: 'Git Commit Agent',
+    localizedTitles: { zh: 'Git 提交助手', en: 'Git Commit Agent' }, iconId: 'git',
+  })
+  assert.equal(zh.iconId, 'create')
+  assert.equal(zh.icon, undefined, 'semantic icons are not literal text or SVG')
+  for (const locale of ['en', 'en-US', 'en_US']) {
+    p.setLocale(locale)
+    const en = p.command.describe()
+    assert.equal(en.title, zh.localizedTitles.en)
+    assert.equal(en.pluginTag, zh.pluginTag, 'stable shared plugin identity')
+    assert.equal(en.localizedTitles, zh.localizedTitles)
+  }
+  assert.equal(p.refreshes, 3)
+  p.change('ungrouped')
+  assert.equal(p.command.describe().disabledReason, 'The current session has no registered workspace')
+  p.setLocale('zh_CN')
+  assert.equal(p.command.describe().title, zh.localizedTitles.zh)
+  assert.equal(p.command.describe().disabledReason, '当前会话没有所属的已注册工作区')
+  p.cleanup(); p.cleanup()
+  assert.equal(p.localeListeners.size, 0)
+  const refreshes = p.refreshes
+  p.setLocale('en')
+  assert.equal(p.refreshes, refreshes, 'locale subscription is released with contribution')
 })
 
 test('palette starts dedicated workspace session and rechecks missing/aborted targets', async () => {

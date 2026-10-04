@@ -476,17 +476,29 @@ window.__ModuleLoader__.load({
       })
     }
 
+    // Pure descriptor data: no palette runtime dependency or React icons.
+    const COMMIT_PALETTE_TITLES = Object.freeze({
+      zh: '在当前工作区启动 Commit Agent',
+      en: 'Start Commit Agent in Current Workspace',
+    })
+    const COMMIT_PALETTE_TAG = Object.freeze({
+      id: 'dsh-git-commit-agent',
+      title: 'Git Commit Agent',
+      localizedTitles: Object.freeze({ zh: 'Git 提交助手', en: 'Git Commit Agent' }),
+      iconId: 'git',
+    })
+
     function paletteCopy(ctx) {
       const locale = service(ctx, 'locale')
       const snapshot = locale && typeof locale.getSnapshot === 'function' && locale.getSnapshot()
-      const english = snapshot && typeof snapshot.active === 'string' && /^en(?:-|$)/i.test(snapshot.active)
+      const english = snapshot && typeof snapshot.active === 'string' && /^en(?:[-_]|$)/i.test(snapshot.active)
       return english ? {
-        title: 'Start Commit Agent in Current Workspace', category: 'Git',
+        title: COMMIT_PALETTE_TITLES.en, category: 'Git',
         missing: 'The current session has no registered workspace',
         unavailable: 'Session creation is unavailable',
         completed: 'Commit planning session created',
       } : {
-        title: '在当前工作区启动 Commit Agent', category: 'Git',
+        title: COMMIT_PALETTE_TITLES.zh, category: 'Git',
         missing: '当前会话没有所属的已注册工作区',
         unavailable: '当前宿主无法创建会话',
         completed: '已创建提交规划会话',
@@ -517,6 +529,9 @@ window.__ModuleLoader__.load({
             const copy = paletteCopy(ctx)
             return {
               title: copy.title, category: copy.category,
+              localizedTitles: COMMIT_PALETTE_TITLES,
+              pluginTag: COMMIT_PALETTE_TAG,
+              iconId: 'create',
               aliases: ['commit', 'agent', 'git', '提交', '规划并提交'],
               disabledReason: denied(),
             }

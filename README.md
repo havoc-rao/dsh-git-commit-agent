@@ -305,8 +305,14 @@ plugin can call the business API's `approvePlan` directly.
 
 **From the command palette or GitLens.** When commandPalette is installed,
 search for **在当前工作区启动 Commit Agent** / **Start Commit Agent in Current Workspace**
-(command ID `dsh-git-commit-agent.start-current-workspace`). It resolves the
-workspace owning the current main-view session from the public session and
+(command ID `dsh-git-commit-agent.start-current-workspace`). The entry follows the
+CMD descriptor protocol: independent `localizedTitles` for the command and its
+**Git 提交助手 / Git Commit Agent** plugin tag (stable tag ID
+`dsh-git-commit-agent`), a `git` identity icon and a `create` action icon for
+creating the planning session. Both languages are searchable regardless of the
+active locale; the palette owns bilingual display and fuzzy matching. The
+single-language `title` remains a dynamic fallback for older palette versions.
+It resolves the workspace owning the current main-view session from the public session and
 workspace stores; an ungrouped session or no current session disables the command.
 The action rechecks the target and creates the same dedicated session with the
 stored model/language preferences, opens it, and seeds/submits the planning prompt.
