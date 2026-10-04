@@ -1505,6 +1505,116 @@ test('cold Inspector fetches the source snapshot without any display session', a
   } finally { globalThis.fetch = oldFetch }
 })
 
+async function paletteHarness() {
+  const { exports } = await loadBundle()
+  const harness = fakeCtx({ workspaces: [{ workspaceId: 'ws', path: '/repo' }] })
+  let current = 'source'
+  let items = [{ workspaceId: 'ws', path: '/repo', sessionIds: ['source'] }]
+  let command: any
+  const listeners = new Set<() => void>()
+  const cleanups: Array<() => void> = []
+  let removed = 0
+  let refreshes = 0
+  const store = (getSnapshot: () => unknown) => ({
+    getSnapshot,
+    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+  })
+  const get = harness.ctx['get'] as (name: string) => any
+  const sessions = get('sessions')
+  sessions.list = store(() => ({ byId: { current: { id: current, retainedBy: { mainView: 1 } } } }))
+  get('workspaces').list = store(() => ({ items }))
+  const palette = {
+    registerCommand(value: any) { command = value; return () => { removed += 1 } },
+    getSnapshot() { return { mode: 'commands' } },
+    refresh() { refreshes += 1 },
+  }
+  let activate: (() => void) | undefined
+  harness.ctx['inject'] = (names: string[], callback: (ctx: unknown) => void) => {
+    assert.deepEqual(names, ['commandPalette'])
+    activate = () => callback({
+      get: (name: string) => name === 'commandPalette' ? palette : get(name),
+      effect: (factory: () => () => void) => { cleanups.push(factory()) },
+    })
+  }
+  await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
+  assert.equal(command, undefined, 'optional contribution waits for palette service')
+  activate!()
+  return {
+    harness, command: command as any, listeners,
+    change(id: string) { current = id; listeners.forEach(fn => fn()) },
+    remove() { items = [] },
+    cleanup() { cleanups.forEach(fn => fn()) },
+    get removed() { return removed }, get refreshes() { return refreshes },
+  }
+}
+
+test('palette registers optional current-workspace action and owns cleanup/refresh', async () => {
+  const p = await paletteHarness()
+  assert.equal(p.command.id, 'dsh-git-commit-agent.start-current-workspace')
+  assert.equal(p.command.target.kind, 'action')
+  assert.equal(p.command.describe().disabledReason, undefined)
+  p.change('ungrouped')
+  assert.ok(p.command.describe().disabledReason)
+  assert.equal(p.refreshes, 1) // shared listener refreshes command availability
+  p.cleanup(); p.cleanup()
+  assert.equal(p.removed, 1)
+  assert.equal(p.listeners.size, 0)
+})
+
+test('palette starts dedicated workspace session and rechecks missing/aborted targets', async () => {
+  const p = await paletteHarness()
+  const controller = new AbortController()
+  const result = await p.command.target.execute({ context: {}, signal: controller.signal })
+  assert.equal(result.kind, 'completed')
+  assertCommitSession(p.harness, { workspaceId: 'ws' })
+  assert.equal(p.harness.submits, 1)
+  p.remove()
+  assert.equal((await p.command.target.execute({ signal: controller.signal })).kind, 'failed')
+  controller.abort()
+  assert.equal((await p.command.target.execute({ signal: controller.signal })).kind, 'cancelled')
+  assert.equal(p.harness.created.length, 1)
+  p.cleanup()
+})
+
+test('palette cancellation after session creation does not submit or claim rollback', async () => {
+  const p = await paletteHarness()
+  const controller = new AbortController()
+  const get = p.harness.ctx['get'] as (name: string) => any
+  const sessions = get('sessions')
+  const create = sessions.create
+  sessions.create = async (input: unknown) => { const id = await create(input); controller.abort(); return id }
+  assert.equal((await p.command.target.execute({ signal: controller.signal })).kind, 'cancelled')
+  assert.equal(p.harness.created.length, 1)
+  assert.equal(p.harness.submits, 0)
+  assert.equal(p.harness.opened.length, 0)
+  p.cleanup()
+})
+
+test('palette rechecks workspace after async model selection before navigation/submission', async () => {
+  const p = await paletteHarness()
+  const get = p.harness.ctx['get'] as (name: string) => any
+  const sessions = get('sessions')
+  const create = sessions.create
+  sessions.create = async (input: unknown) => { const id = await create(input); p.remove(); return id }
+  const result = await p.command.target.execute({ signal: new AbortController().signal })
+  assert.equal(result.kind, 'failed')
+  assert.equal(p.harness.created.length, 1)
+  assert.equal(p.harness.submits, 0)
+  assert.equal(p.harness.opened.length, 0)
+  p.cleanup()
+})
+
+test('palette never falls back to ungrouped cwd after workspace create failure', async () => {
+  const p = await paletteHarness()
+  const get = p.harness.ctx['get'] as (name: string) => any
+  let attempts = 0
+  get('sessions').create = async () => { attempts += 1; throw new Error('workspace/not-found') }
+  const result = await p.command.target.execute({ signal: new AbortController().signal })
+  assert.equal(result.kind, 'failed')
+  assert.equal(attempts, 1)
+  p.cleanup()
+})
+
 test('cold plan descriptors recover using exact route even without native params or meta', async () => {
   const { registration } = await loadBundle()
   const requests: string[] = []

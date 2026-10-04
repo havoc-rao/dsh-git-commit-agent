@@ -397,14 +397,27 @@ window.__ModuleLoader__.load({
      * stays under 未分组, which is unavoidable because the host only accepts a
      * membership whose cwd equals the Workspace path exactly.
      */
-    async function startPlanning(ctx, target) {
+    async function startPlanning(ctx, target, options) {
+      options = options || {}
+      const cancelled = function () { return options.signal && options.signal.aborted }
+      if (cancelled()) return undefined
       const worktree = target.worktree || target.repoRoot
       if (!worktree) throw new Error('找不到目标 worktree')
       const sessions = service(ctx, 'sessions')
       if (!sessions || typeof sessions.create !== 'function') {
         throw new Error('当前宿主没有可用的 sessions 服务')
       }
-      const workspaceId = workspaceIdForPath(ctx, worktree)
+      const workspaceId = options.workspaceId || workspaceIdForPath(ctx, worktree)
+      // Palette targets must remain registered; GitLens retains its cwd fallback.
+      const checkTarget = function () {
+        if (!options.workspaceId) return
+        const latest = currentCommitWorkspace(ctx)
+        if (!latest || latest.workspaceId !== options.workspaceId || normalizePath(latest.path) !== normalizePath(worktree)) {
+          throw new Error(paletteCopy(ctx).missing)
+        }
+      }
+      checkTarget()
+      if (cancelled()) return undefined
       // Preallocate the id so the host knows this is a commit session and
       // installs the five tools into exactly this agent's scope.
       const requestedId = newSessionId()
@@ -415,6 +428,8 @@ window.__ModuleLoader__.load({
         try {
           sessionId = await sessions.create({ sessionId: requestedId, workspaceId: workspaceId })
         } catch (failure) {
+          if (options.workspaceId) throw failure
+          if (cancelled()) return undefined
           // The Workspace may have been removed between the snapshot read and
           // the call. A session in the right directory is still useful; it
           // simply remains ungrouped.
@@ -426,7 +441,10 @@ window.__ModuleLoader__.load({
       // the request header is built with it (the composer model seat's exact
       // selection path). Best-effort: a missing remote or a stale route keeps
       // the host default.
+      if (cancelled()) return sessionId
       await applyStoredDefaultModel(ctx, sessionId)
+      if (cancelled()) return sessionId
+      checkTarget()
       const workspace = service(ctx, 'uiWorkspace')
       if (workspace && typeof workspace.openSession === 'function') workspace.openSession(sessionId)
       else if (typeof sessions.open === 'function') sessions.open(sessionId)
@@ -440,6 +458,104 @@ window.__ModuleLoader__.load({
         if (typeof input.submit === 'function') input.submit()
       }
       return sessionId
+    }
+
+    /** Current target comes from public stores, never palette context or DOM focus. */
+    function currentCommitWorkspace(ctx) {
+      const sessions = service(ctx, 'sessions')
+      const workspaces = service(ctx, 'workspaces')
+      const sessionSnapshot = sessions && sessions.list && sessions.list.getSnapshot()
+      const workspaceSnapshot = workspaces && workspaces.list && workspaces.list.getSnapshot()
+      const current = Object.values(sessionSnapshot && sessionSnapshot.byId || {}).find(function (row) {
+        return row && row.retainedBy && row.retainedBy.mainView > 0
+      })
+      if (!current) return undefined
+      return (workspaceSnapshot && workspaceSnapshot.items || []).find(function (row) {
+        return row && typeof row.path === 'string' && row.path !== ''
+          && Array.isArray(row.sessionIds) && row.sessionIds.includes(current.id)
+      })
+    }
+
+    function paletteCopy(ctx) {
+      const locale = service(ctx, 'locale')
+      const snapshot = locale && typeof locale.getSnapshot === 'function' && locale.getSnapshot()
+      const english = snapshot && typeof snapshot.active === 'string' && /^en(?:-|$)/i.test(snapshot.active)
+      return english ? {
+        title: 'Start Commit Agent in Current Workspace', category: 'Git',
+        missing: 'The current session has no registered workspace',
+        unavailable: 'Session creation is unavailable',
+        completed: 'Commit planning session created',
+      } : {
+        title: '在当前工作区启动 Commit Agent', category: 'Git',
+        missing: '当前会话没有所属的已注册工作区',
+        unavailable: '当前宿主无法创建会话',
+        completed: '已创建提交规划会话',
+      }
+    }
+
+    function registerCommitPalette(ctx, palette) {
+      const disposers = []
+      let disposed = false
+      const cleanup = function () {
+        if (disposed) return
+        disposed = true
+        let failure
+        disposers.reverse().forEach(function (off) {
+          try { off() } catch (error) { failure = error }
+        })
+        if (failure) throw failure
+      }
+      const denied = function () {
+        if (!currentCommitWorkspace(ctx)) return paletteCopy(ctx).missing
+        const sessions = service(ctx, 'sessions')
+        if (!sessions || typeof sessions.create !== 'function') return paletteCopy(ctx).unavailable
+      }
+      try {
+        disposers.push(palette.registerCommand({
+          id: 'dsh-git-commit-agent.start-current-workspace',
+          describe: function () {
+            const copy = paletteCopy(ctx)
+            return {
+              title: copy.title, category: copy.category,
+              aliases: ['commit', 'agent', 'git', '提交', '规划并提交'],
+              disabledReason: denied(),
+            }
+          },
+          target: {
+            kind: 'action',
+            execute: async function (args) {
+              if (args.signal.aborted) return { kind: 'cancelled' }
+              const reason = denied()
+              if (reason) return { kind: 'failed', message: reason }
+              const target = currentCommitWorkspace(ctx)
+              try {
+                await startPlanning(ctx, { worktree: target.path }, {
+                  signal: args.signal, workspaceId: target.workspaceId,
+                })
+                // Abort after creation does not undo the created session.
+                return args.signal.aborted ? { kind: 'cancelled' }
+                  : { kind: 'completed', message: paletteCopy(ctx).completed }
+              } catch (error) {
+                return args.signal.aborted ? { kind: 'cancelled' }
+                  : { kind: 'failed', message: error instanceof Error ? error.message : String(error) }
+              }
+            },
+          },
+        }))
+        const refresh = function () {
+          if (palette.getSnapshot().mode === 'commands') palette.refresh()
+        }
+        const sessions = service(ctx, 'sessions')
+        const workspaces = service(ctx, 'workspaces')
+        const locale = service(ctx, 'locale')
+        ;[sessions && sessions.list, workspaces && workspaces.list, locale].forEach(function (store) {
+          if (store && typeof store.subscribe === 'function') disposers.push(store.subscribe(refresh))
+        })
+      } catch (error) {
+        try { cleanup() } catch (_) { /* Preserve registration failure. */ }
+        throw error
+      }
+      return cleanup
     }
 
     /**
@@ -1707,6 +1823,15 @@ window.__ModuleLoader__.load({
      */
     exports.apply = async function apply(ctx) {
       injectStyles()
+
+      // Optional enhancement: absence/late arrival of palette never blocks GitLens.
+      if (typeof ctx.inject === 'function') {
+        ctx.inject(['commandPalette'], function (paletteCtx) {
+          paletteCtx.effect(function () {
+            return registerCommitPalette(paletteCtx, service(paletteCtx, 'commandPalette'))
+          })
+        })
+      }
 
       const sidebar = service(ctx, 'betterSidebar')
       const planSidebar = createPlanSidebar(ctx)

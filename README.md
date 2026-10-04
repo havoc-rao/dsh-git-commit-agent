@@ -303,7 +303,23 @@ plugin can call the business API's `approvePlan` directly.
 
 ## Trying it
 
-**Only from GitLens.** With pending changes, click the **commit-node icon** in
+**From the command palette or GitLens.** When commandPalette is installed,
+search for **在当前工作区启动 Commit Agent** / **Start Commit Agent in Current Workspace**
+(command ID `dsh-git-commit-agent.start-current-workspace`). It resolves the
+workspace owning the current main-view session from the public session and
+workspace stores; an ungrouped session or no current session disables the command.
+The action rechecks the target and creates the same dedicated session with the
+stored model/language preferences, opens it, and seeds/submits the planning prompt.
+It does not infer a workspace from palette invocation context, DOM focus or cwd,
+and does not preflight Git status: the dedicated agent inspects repository state.
+Registration is optional through `ctx.inject(['commandPalette'])`; the child effect
+owns command/subscription disposal and store changes refresh command availability.
+Cancellation before creation prevents it; cancellation after creation does not
+remove the session, but stops subsequent navigation/submission where possible.
+No palette runtime import, required loading dependency or new shortcut is added.
+This integration has automated client tests, not live browser verification.
+
+From GitLens, with pending changes, click the **commit-node icon** in
 the commit row (next to the built-in Commit button; its tooltip reads
 **在新会话中规划并提交这些变更**). The plugin opens a new session in the selected
 worktree, seeds the planning request and submits it.
