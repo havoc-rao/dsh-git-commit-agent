@@ -453,12 +453,44 @@ test('requestPlanApproval asks the approval service and maps allowed-once to app
   assert.equal(seen.toolName, 'commit_agent_apply_plan')
   assert.equal(seen.callId, 'call-1')
   assert.equal(seen.reason, prompt.question)
+  assert.equal(seen.detail, prompt.detail)
   // Localized presentation copy: Chinese is the primary UI copy, the English
   // question stays as the fallback and as the persisted audit reason.
   assert.ok(seen.displayReason)
   assert.equal(seen.displayReason['en'], 'Approve this plan and allow the executor to create 1 commit?')
   assert.equal(seen.displayReason['zh'], '批准该提交计划并允许执行器创建 1 个提交？')
   assert.equal(seen.signal, prompt.signal)
+})
+
+test('apply_plan sends the frozen revision Markdown through the host approval adapter', async () => {
+  const fixture = await createInitialisedFixture()
+  try {
+    await writeFile(fixture.root, 'src/thing.ts', 'export const thing = 1\n')
+    const service = new CommitAgentService({ dataDir: fixture.dataDir })
+    const approval = fakeApproval(() => 'rejected')
+    const tools = buildCommitAgentTools({
+      service,
+      resolveWorkspace: async () => fixture.root,
+      askUserApproval: (prompt) => requestPlanApproval(approval.service, prompt),
+    })
+    const exec = execContext('session-agent', 'call-review')
+    const identity = await prepareOne(tools, exec)
+    const version = (await service.plansOf(identity.taskId)).find((plan) =>
+      plan.planId === identity.planId && plan.revision === identity.revision)
+    assert.ok(version)
+    const result = await toolNamed(tools, 'commit_agent_apply_plan').execute(
+      { planId: identity.planId, revision: identity.revision }, exec,
+    ) as Record<string, unknown>
+    assert.equal(result['approved'], false)
+    assert.equal(approval.requests.length, 1)
+    assert.equal(approval.requests[0]?.callId, 'call-review')
+    assert.equal(approval.requests[0]?.detail, buildPlanReview(version).detail)
+    assert.ok(approval.requests[0]?.detail?.includes('src/thing.ts'))
+    assert.ok(approval.requests[0]?.detail?.includes(identity.planDigest.slice(0, 16)))
+    assert.equal(git(fixture.root, ['log', '--format=%s', '-n1']).trim(), 'chore: initial commit')
+  } finally {
+    await fixture.cleanup()
+  }
 })
 
 test('requestPlanApproval maps every non-grant outcome to approved:false', async () => {

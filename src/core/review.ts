@@ -11,10 +11,9 @@
  *  - the document shown to the user is derived from the same content the
  *    approval digest covers, so what is approved is what is displayed.
  *
- * The full document travels in the transcript (the `commit_agent_prepare_plan`
- * tool call already presented it); the approval panel receives only the short
- * question as its reason, so the reviewer decides against the plan they just
- * read in chat.
+ * The approval request carries the full Markdown document as `detail` and the
+ * short question as `reason`. The transcript's prepare card separately presents
+ * the same frozen plan revision for review before submission.
  */
 import type { PlanDeltaEntry, PlanVersion } from './types.js'
 import { statusXy } from './types.js'

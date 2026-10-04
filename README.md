@@ -36,6 +36,67 @@ GitLens entry ──▶ dedicated native session ──▶ status/diff analysis
 
 122 automated tests pass against real, isolated git repositories (`npm test`).
 
+## Plan Inspector (including no active session)
+
+With better-sidebar's `inspectors` feature, the plugin registers two stable
+Inspector types: `dsh-gca-plan` (a publication snapshot) and `dsh-gca-plans`
+(the recent-plan entry). The recent list uses the authenticated read-only
+`/git-commit-agent/api/plan-index` route; it supports workspace-path filtering
+and pagination without returning historical patches in list responses. The
+current store keeps worktree paths rather than a separate registered workspace
+identity, so the filter currently matches an exact worktree path.
+
+**明细** and **查看差异** on a transcript card navigate to the exact commit in
+one Inspector, rather than expanding a second copy of its details. Overview,
+commit index, dependency links, exclusions and revision delta navigate within
+that page. Diff is the saved publication patch (plain text), never a recomputed
+worktree diff. Truncated and unavailable historical previews remain explicit.
+
+The source session belongs to the resource identity, not to its display seat.
+Opening a resource does not activate or resume its source session. Stable kinds
+allow the sidebar to restore references before any transcript mounts. Reopening
+the same revision updates its location; opening another revision uses a distinct
+resource id. Inspector mode does not poll full historical payloads or auto-open background
+publications; explicit navigation and list refresh never steal focus. Viewing is read-only and never constitutes approval.
+
+Older sidebar installations without `inspectors` retain the session-scoped
+native Plan tab fallback below (they cannot provide the no-session Inspector).
+
+## Full plan in the existing right sidebar (legacy fallback)
+
+The prepare-plan transcript card now has **在侧栏查看完整计划**. The page shows
+commit groups, the complete multi-line message, rationale, dependencies, file
+status/layer/rename/binary markers, stats, exclusions, warnings/blockers and the
+full revision/digest identity. Each group retains **查看差异**. This is a read-only
+publication snapshot, not an approval surface; it remains available after an
+approval decision or execution.
+
+While a dedicated commit session is mounted in the native right sidebar, the
+client polls the plugin's authenticated, read-only plan route every two seconds.
+The first successful response on initial load, every session switch or remount
+is a historical baseline: it registers the pages without revealing them. Only
+new identities seen subsequently in that same mounted session reveal a page.
+Hidden browser documents do not reveal new plans. No private session event
+source, conversation pagination hooks, approval listeners or `apply_plan` calls
+are involved.
+
+Native sidebar params/meta are transient and native opens ignore a seed's id.
+Each revision therefore registers a hidden, stable tab kind encoding its session,
+task, plan, revision and digest; repeated opens focus that same native page.
+Payloads are stored atomically in private plugin presentation files and recovered
+through `/git-commit-agent/api/plan`; legacy publications are recovered from the
+session's durable successful prepare-tool results through a public read handle.
+Recovery never recomputes patches from today's worktree. Missing historical
+payloads are reported as unavailable, not invented. The sidebar layout itself
+is managed by the host: if refresh collapses it, reopen the historical card.
+
+Run `npm run build` for host artifacts. This package's hand-written client module
+is already its served artifact; a browser refresh loads it. A running host must
+reload/restart its existing plugin instance to mount new host HTTP routes (a
+browser refresh alone cannot replace host code). Do not start another server to
+update the original GUI. Authenticated browser rendering remains a separate
+manual check when this agent has no browser session/cookie.
+
 ## Prerequisites
 
 - **A default model, or an explicit one.** The dedicated session drives a real
@@ -224,19 +285,21 @@ network and no delegation tool.
 ## How approval works
 
 The model can propose, preview and explain — it can never approve. Approval goes
-through the host's own question surface using the `plan-review` intent
-(`ctx.userQuestions.ask({ ... intent: { kind: 'plan-review', approve: 'Approve' } })`),
-so the user sees the plan document the content digest covers and answers through
-a host-owned protocol. The document lists per commit the frozen file paths
+through the host's standard approval service (`ctx.approval.request()`), so the
+user answers through a host-owned protocol. The request supplies the short
+question as `reason`, localized question copy as `displayReason`, and the exact
+plan revision's Markdown document as `detail`. Hosts supporting approval
+Markdown detail render it in the ApprovalPanel using the shared safe Markdown
+renderer; older hosts show the question only, with the prepare card still
+available in the transcript. The document lists per commit the frozen file paths
 (status + layer), the `--numstat` counts and the base→expected trees; revisions
 stored before review details existed fall back to change ids with an explicit
-note. `commit_agent_apply_plan` submits one exact
-revision; a decline is a normal outcome (the user's free-text feedback reaches
-the model), and a newer revision revokes an older approval. Only after the
+note. `commit_agent_apply_plan` submits one exact revision; only `allowed-once`
+grants approval, and a newer revision revokes an older approval. Only after the
 decision does the host execute — the same call returns the execution result.
-`approvedBy` is recorded as `user:plan-review` — an audit label, not a
-cryptographic identity: DSH has no authenticated in-process user identity, and
-any in-process plugin can call the business API's `approvePlan` directly.
+`approvedBy` is recorded as `user:approval` — an audit label, not a cryptographic
+identity: DSH has no authenticated in-process user identity, and any in-process
+plugin can call the business API's `approvePlan` directly.
 
 ## Trying it
 
@@ -318,7 +381,7 @@ Either way the flow is the same:
    stays a read-only snapshot; stats and file lists always come from the
    untruncated `--numstat`);
 3. the agent calls `commit_agent_apply_plan` and you decide in the host's
-   plan-review panel — its document lists each file with a **porcelain-XY
+   ApprovalPanel — its Markdown document lists each file with a **porcelain-XY
    status symbol** (first slot staged, second unstaged; `??` untracked), the
    stat and the trees, all from the plan's frozen review detail, never live
    worktree reads;

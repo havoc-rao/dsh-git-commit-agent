@@ -37,6 +37,7 @@ import {
   type UserApprovalPrompt,
 } from './host/tools.js'
 import { EditCapabilityController } from './host/edit-capability.js'
+import { mountPlanHttpRoutes } from './host/plan-http.js'
 import {
   buildCommitAgentSystemPrompt,
   buildInitialPlanRequest,
@@ -482,12 +483,10 @@ function approvalQuestionZh(question: string): string {
  *
  * Design notes, all verified against the host sources:
  *
- * - `ApprovalRequest` has no detail field: the full plan document stays in the
- *   transcript (`commit_agent_prepare_plan` already presented it) and the
- *   approval panel receives a short reason plus localized display copy. The
- *   panel can additionally render `conversation.approval.detail` correlation
- *   through `callId`, which the apply tool forwards when the host execution
- *   carries one.
+ * - `detail` carries the frozen plan revision's Markdown to the approval panel;
+ *   `reason` stays short and `displayReason` supplies localized question copy.
+ *   Hosts without Markdown approval-detail support show only the question;
+ *   the prepare tool's transcript card remains available on those hosts.
  * - The audit pair must be turn-enclosed (`user-approval/src/index.ts:84-92`):
  *   the `approval/asked` + `approval/decided` events are only durable inside an
  *   open turn. The ONLY caller of this function is the `commit_agent_apply_plan`
@@ -530,6 +529,7 @@ export async function requestPlanApproval(
       // `displayReason` (localized) when present. Chinese is the primary
       // presentation copy; the English question stays as the stable audit text.
       reason: prompt.question,
+      detail: prompt.detail,
       displayReason: { en: prompt.question, zh: approvalQuestionZh(prompt.question) },
       ...(prompt.signal === undefined ? {} : { signal: prompt.signal }),
     })
@@ -588,6 +588,10 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
       }
     },
   })
+
+  // Dependency-owned HTTP routes use the public host authentication fence;
+  // no routes are exposed at all on hosts without Connection admission.
+  ctx.inject?.(['webServer', 'connection'], (child) => mountPlanHttpRoutes(child, plugin.service))
 
   const editCapabilities = new EditCapabilityController(plugin.service)
   const deps: ToolDependencies = {

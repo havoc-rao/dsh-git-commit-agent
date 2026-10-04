@@ -209,6 +209,8 @@ export interface HostApprovalService {
     readonly toolName: string
     readonly callId?: string
     readonly reason?: string
+    /** Markdown for the exact plan revision under review; presentation only. */
+    readonly detail?: string
     /** Localized presentation copy; never persisted in the audit events. */
     readonly displayReason?: { readonly en: string; readonly [locale: string]: string }
     readonly signal?: AbortSignal

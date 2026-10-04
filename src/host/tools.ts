@@ -27,6 +27,7 @@
  * dependency on `@deepseek-ai/dsh-tools`. The shape is the one the host's
  * `tools.register` requires (verified in P0).
  */
+import { preparePlanPresentation, persistPlanPresentation } from './plan-presentation.js'
 import { EditCapabilityController } from './edit-capability.js'
 import { asGitCommitError, GitCommitError, type GitCommitErrorCode } from '../core/errors.js'
 import type { CommitAgentService } from '../core/service.js'
@@ -491,28 +492,7 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
       // The canonical value carries the per-commit patch so a client-side plan
       // card can render a proposed diff without a second host round-trip. The
       // model never sees this: it only receives `render`'s text projection.
-      presentationMeta: (_args, value) => {
-        const v = value as Record<string, unknown>
-        const plan = (v['plan'] as Record<string, unknown> | undefined) ?? {}
-        const preview = (v['preview'] as Array<Record<string, unknown>> | undefined) ?? []
-        return {
-          taskId: v['taskId'] ?? null,
-          planId: plan['planId'] ?? null,
-          revision: plan['revision'] ?? null,
-          planDigest: plan['planDigest'] ?? null,
-          status: plan['status'] ?? null,
-          indexStrategy: plan['indexStrategy'] ?? null,
-          approved: plan['approved'] === true,
-          blockers: plan['blockers'] ?? [],
-          warnings: plan['warnings'] ?? [],
-          commits: plan['commits'] ?? [],
-          excludedChanges: plan['excludedChanges'] ?? [],
-          reviewDetail: v['reviewDetail'] ?? null,
-          delta: plan['delta'] ?? null,
-          preview: preview,
-          previewTruncated: preview.some((block) => block['patchTruncated'] === true),
-        } as never
-      },
+      presentationMeta: (_args, value) => preparePlanPresentation(value),
       render: textRender((v: Record<string, unknown>) => {
         const plan = (v['plan'] as Record<string, unknown> | undefined) ?? {}
         const blockers = (plan['blockers'] as Array<Record<string, unknown>> | undefined) ?? []
@@ -550,7 +530,7 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
           },
           { signal: exec.signal as AbortSignal },
         )
-        return {
+        const value = {
           taskId,
           plan: summarisePlan(published.plan),
           reviewDetail: published.plan.reviewDetail ?? null,
@@ -571,6 +551,8 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
               ? `Explain this plan in chat, then call commit_agent_apply_plan with planId ${published.plan.planId} and revision ${published.plan.revision} (digest ${published.plan.planDigest}) to submit it for approval.`
               : 'Resolve the blockers and prepare a new revision.',
         }
+        await persistPlanPresentation(service.directory, preparePlanPresentation(value), exec.agent?.session.id)
+        return value
       } catch (error) {
         failure(error)
       }
@@ -592,7 +574,7 @@ export function buildCommitAgentTools(deps: ToolDependencies): HostToolDefinitio
     name: 'commit_agent_apply_plan',
     description:
       'Submit exactly one plan revision to the human for approval and, once approved, execute it. The host shows '
-      + 'the approval panel with a short reason; the full plan document is the transcript of this call (the plan '
+      + 'the approval panel with a short reason and the exact plan revision as Markdown detail (the plan '
       + 'was already presented by commit_agent_prepare_plan). You cannot approve a plan yourself, and a revision '
       + 'that was never approved is never committed. Only the newest revision of a plan can be applied. The host '
       + 're-verifies the content digest, that the repository still matches the plan snapshot and that the exact '

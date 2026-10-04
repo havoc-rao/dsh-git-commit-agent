@@ -46,6 +46,7 @@ function fakeReact(): Record<string, unknown> {
         value = next
       }]
     },
+    useEffect() {},
     useRef(initial: unknown): { current: unknown } {
       return { current: initial }
     },
@@ -280,7 +281,9 @@ function fakeCtx(options: {
 test('the bundle registers itself under the package name and exports inject/apply', async () => {
   const { exports, registration } = await loadBundle()
   assert.equal(registration.id, 'dsh-git-commit-agent')
-  assert.deepEqual(exports['inject'], ['slots', 'sessions', 'betterSidebar'])
+  // The observer must wait for the mounted-seat service instead of silently
+  // returning a no-op when sidebarRight arrives after this plugin applies.
+  assert.deepEqual(exports['inject'], ['slots', 'sessions', 'betterSidebar', 'sidebarRight'])
   assert.equal(typeof exports['apply'], 'function')
 })
 
@@ -1206,4 +1209,205 @@ test('the catalog loader resolves instead of hanging: missing remote, throwing a
   }
   const stored = await load(viaStore)
   assert.deepEqual(stored, { groups: [], failed: true })
+})
+
+
+test('plan sidebar uses durable revision kind, dedupes registrations and opens scoped', async () => {
+  const { exports } = await loadBundle()
+  const hooks = exports['__test'] as any
+  const descriptors: any[] = [], opened: any[] = []
+  const ctx = { betterSidebar: {
+    registerTab(d: any) { descriptors.push(d); return () => undefined },
+    openTab(seed: any, scope: any) { opened.push({ seed, scope }) },
+  } }
+  const plans = hooks.createPlanSidebar(ctx)
+  const session = 'session-git-commit-history'
+  const meta = { taskId: 'task', planId: 'plan', revision: 1, planDigest: 'digest', preview: [] }
+  assert.equal(plans.open(meta, session), true)
+  plans.open(meta, session)
+  plans.open({ ...meta, revision: 2 }, session)
+  assert.equal(descriptors.length, 2)
+  assert.equal(descriptors[0].createTab, undefined)
+  assert.notEqual(descriptors[0].id, descriptors[1].id)
+  assert.deepEqual(JSON.parse(decodeURIComponent(descriptors[0].id.slice('dsh-gca-plan-'.length))),
+    [session, 'task', 'plan', 1, 'digest'])
+  assert.equal(opened[0].scope.sessionId, session)
+  assert.equal(opened[0].seed.meta, undefined)
+  assert.equal(plans.open(meta, 'ordinary-session'), true)
+})
+
+test('full plan renders entire message, rationale, dependencies, exclusions and digest', async () => {
+  const { exports } = await loadBundle()
+  const hooks = exports['__test'] as any
+  const node = hooks.FullPlan({ sessionId: 'session-git-commit-history', ctx: {}, meta: {
+    taskId: 'task', planId: 'plan', revision: 3, planDigest: 'full-digest',
+    commits: [{ id: 'c1', message: 'subject\n\ncomplete body', rationale: 'group reason', dependsOn: ['c0'] }],
+    preview: [{ commitId: 'c1', patch: 'diff', stat: { files: 1, additions: 2, deletions: 3 },
+      changes: [{ path: 'new.ts', oldPath: 'old.ts', status: 'renamed', layer: 'index' }] }],
+    blockers: [{ code: 'blocked', message: 'reason' }], warnings: ['warning'],
+    excludedChanges: [{ path: 'excluded.ts', reason: 'keep out' }],
+  } })
+  const text = JSON.stringify(node)
+  for (const value of ['complete body', 'group reason', 'c0', 'full-digest', 'excluded.ts', 'keep out', 'old.ts', 'blocked']) {
+    assert.ok(text.includes(value), value)
+  }
+})
+
+test('live plan observer never reveals baseline/replay/switch and disposes polling', async () => {
+  const { exports } = await loadBundle()
+  const hooks = exports['__test'] as any
+  let current = 'session-git-commit-a', listener: () => void = () => undefined
+  let pending: (() => Promise<void>) | undefined, responsePlans: any[] = []
+  const opened: any[] = [], registered: any[] = []
+  const mk = (revision: number) => ({ taskId: 't', planId: 'p', revision, planDigest: 'd' + revision, preview: [] })
+  responsePlans = [mk(1)]
+  const stop = hooks.observePlans({ sidebarRight: { mounted: {
+    getSnapshot: () => current, subscribe(fn: () => void) { listener = fn; return () => { listener = () => undefined } },
+  } } }, { register(m: any) { registered.push(m) }, open(m: any, session: string) { opened.push({ m, session }) } }, {
+    fetch: async () => ({ ok: true, json: async () => ({ sessionId: current, plans: responsePlans }) }),
+    setTimeout(fn: () => Promise<void>) { pending = fn; return 1 }, clearTimeout() { pending = undefined },
+  })
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(opened.length, 0)
+  responsePlans = [mk(1), mk(2)]
+  await pending!()
+  assert.equal(opened.length, 1)
+  assert.equal(opened[0].m.revision, 2)
+  await pending!()
+  assert.equal(opened.length, 1)
+  current = 'session-git-commit-b'; listener()
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(opened.length, 1)
+  current = 'session-git-commit-a'; listener()
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(opened.length, 1)
+  assert.ok(registered.length >= 2)
+  stop()
+  assert.equal(pending, undefined)
+})
+
+
+test('inspectors register stable kinds and open source snapshots without a mounted session', async () => {
+  const { exports } = await loadBundle()
+  const hooks = exports['__test'] as any
+  const descriptors: any[] = [], opened: any[] = []
+  let disposed = 0
+  const plans = hooks.createPlanSidebar({ betterSidebar: {
+    features: ['inspectors'],
+    registerInspector(d: any) { descriptors.push(d); return () => { disposed++ } },
+    openInspector(seed: any) { opened.push(seed); return true },
+  } })
+  assert.deepEqual(descriptors.map(d => d.id), ['dsh-gca-plan', 'dsh-gca-plans'])
+  assert.equal(descriptors[1].entry, true)
+  const meta = { taskId: 't', planId: 'p', revision: 1, planDigest: 'd', commits: [], preview: [] }
+  const location = { section: 'commit', commitId: 'c1', view: 'details' }
+  assert.equal(plans.open(meta, 'source-session', location), true)
+  assert.deepEqual(opened[0].resource, { sourceSessionId: 'source-session', taskId: 't', planId: 'p', revision: 1, digest: 'd' })
+  assert.deepEqual(opened[0].location, location)
+  plans.open(meta, 'source-session', { ...location, view: 'diff' })
+  assert.equal(opened[0].id, opened[1].id)
+  assert.equal(descriptors.length, 2, 'one descriptor per stable inspector type, not per revision')
+  const cold = descriptors[0].component({ resource: { ...opened[0].resource, revision: 9, digest: 'cold' }, location })
+  assert.ok(JSON.stringify(cold).includes('正在恢复历史计划'), 'cold resources do not need current session props')
+  plans.dispose()
+  assert.equal(disposed, 2)
+})
+
+test('Inspector mode does not poll historical patches or auto-reveal background plans', async () => {
+  const { exports } = await loadBundle()
+  const hooks = exports['__test'] as any
+  let called = false
+  const stop = hooks.observePlans({}, { automaticReveal: false }, { fetch() { called = true } })
+  assert.equal(called, false)
+  stop()
+})
+
+test('plan detail and diff buttons forward exact commit location', async () => {
+  const { exports } = await loadBundle()
+  const hooks = exports['__test'] as any
+  const opened: any[] = []
+  const meta = { taskId: 't', planId: 'p', revision: 2, planDigest: 'd', commits: [],
+    preview: [{ commitId: 'c', message: 'subject', patch: 'stored diff', changes: [] }] }
+  const node = hooks.PlanCard({ block: { meta }, sessionId: 'source',
+    openPlan(m: any, session: string, location: any) { opened.push({ m, session, location }); return true } })
+  walk(node, e => {
+    if (e.type === 'button' && ['明细', '查看差异'].includes(e.props.children as string)) (e.props.onClick as () => void)()
+  })
+  assert.deepEqual(opened.map(o => o.location), [
+    { section: 'commit', commitId: 'c', view: 'details' }, { section: 'commit', commitId: 'c', view: 'diff' },
+  ])
+  assert.ok(opened.every(o => o.m === meta && o.session === 'source'))
+  const full = hooks.FullPlan({ meta, sessionId: 'source', location: opened[1].location })
+  assert.ok(JSON.stringify(full).includes('stored diff'))
+  assert.ok(JSON.stringify(full).includes('返回明细'))
+})
+
+test('unavailable cold snapshots show an error rather than an endless loading message', async () => {
+  const { registration } = await loadBundle()
+  const react = fakeReact()
+  const original = react['useState'] as (value: unknown) => unknown
+  let first = true
+  react['useState'] = (value: unknown) => {
+    if (first) { first = false; return [{ meta: null, error: 'HTTP 404' }, () => undefined] }
+    return original(value)
+  }
+  const hooks = registration.factory(() => react)['__test'] as any
+  const node = hooks.PlanPage({ identity: ['source', 't', 'p', 1, 'd'], ctx: {} })
+  const text = JSON.stringify(node)
+  assert.ok(text.includes('历史计划暂不可用'))
+  assert.ok(text.includes('不会从当前工作树重新生成'))
+  assert.equal(text.includes('正在恢复历史计划'), false)
+})
+
+test('cold Inspector fetches the source snapshot without any display session', async () => {
+  const { registration } = await loadBundle()
+  const requests: string[] = []
+  const react = fakeReact()
+  react['useEffect'] = (fn: () => unknown) => { fn() }
+  const hooks = registration.factory(() => react)['__test'] as any
+  const descriptors: any[] = []
+  const oldFetch = globalThis.fetch
+  const meta = { taskId: 't', planId: 'p', revision: 4, planDigest: 'saved', commits: [], preview: [] }
+  globalThis.fetch = (async (url: string) => { requests.push(url); return { ok: true, json: async () => meta } }) as any
+  try {
+    const plans = hooks.createPlanSidebar({ betterSidebar: {
+      features: ['inspectors'], registerInspector(d: any) { descriptors.push(d); return () => undefined },
+      openInspector() { return true },
+    } })
+    descriptors[0].component({ resource: { sourceSessionId: 'source-only', taskId: 't', planId: 'p', revision: 4, digest: 'saved' },
+      location: { section: 'commit', commitId: 'c', view: 'diff' } })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(requests.length, 1)
+    const q = new URL(requests[0]!, 'http://local').searchParams
+    assert.deepEqual(Object.fromEntries(q), { sessionId: 'source-only', taskId: 't', planId: 'p', revision: '4', digest: 'saved' })
+    descriptors[1].component({ resource: {}, visible: true })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(new URL(requests[1]!, 'http://local').pathname, '/git-commit-agent/api/plan-index')
+    assert.equal(new URL(requests[1]!, 'http://local').searchParams.has('sessionId'), false)
+    plans.dispose()
+  } finally { globalThis.fetch = oldFetch }
+})
+
+test('cold plan descriptors recover using exact route even without native params or meta', async () => {
+  const { registration } = await loadBundle()
+  const requests: string[] = []
+  const react = fakeReact()
+  react['useEffect'] = (fn: () => unknown) => { fn() }
+  const hooks = registration.factory(() => react)['__test'] as any
+  const oldFetch = globalThis.fetch
+  globalThis.fetch = (async (url: string) => { requests.push(url); return { ok: true, json: async () => meta } }) as any
+  const meta = { taskId: 't', planId: 'p', revision: 7, planDigest: 'exact-digest', commits: [], preview: [] }
+  const descriptors: any[] = []
+  try {
+    const sidebar = hooks.createPlanSidebar({ betterSidebar: { registerTab(d: any) { descriptors.push(d); return () => undefined } } })
+    sidebar.register(meta, 'session-git-commit-cold')
+    // A fresh native synthetic record carries only kind/id/title after refresh.
+    descriptors[0].component({ scope: { sessionId: 'session-git-commit-cold' }, tab: { id: 'native-new-id', type: descriptors[0].id } })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.equal(requests.length, 1)
+    const query = new URL(requests[0]!, 'http://local').searchParams
+    assert.equal(query.get('sessionId'), 'session-git-commit-cold')
+    assert.equal(query.get('revision'), '7')
+    assert.equal(query.get('digest'), 'exact-digest')
+  } finally { globalThis.fetch = oldFetch }
 })
