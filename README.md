@@ -342,6 +342,43 @@ through the business API's `startDedicatedSession` gets one from the same
 first prompt assembly — for both `create` and `resume`, so the first model
 request already runs against the closed surface.
 
+### Native Git More action slot
+
+The Git command **More** menu contains **规划并提交** (plan and commit),
+with an **agent** subtitle badge on the right. Its `MenuItemButton` children
+use the public label layout: `span[data-better-sidebar-git-action-label]`
+contains `span[data-better-sidebar-git-action-title]` (the existing title) and
+`span[data-better-sidebar-git-action-subtitle]` (`agent`). Better-sidebar owns
+the shared truncating title / trailing token-badge styling; this plugin adds
+no layout CSS or runtime imports and does not misuse the `shortcut` field.
+Older hosts without that shared styling still render both text spans.
+The client uses `ctx.slots.inject('betterSidebar.git.actions', () =>
+ctx.slots.register({ name: 'betterSidebar.git.actions',
+id: 'dsh-git-commit-agent:plan-and-commit', order: 50 }, Component))`.
+This is the better-sidebar **list / root** protocol, not the legacy
+`registerGitCommitAction` registry; the same operation is never registered twice.
+
+The contribution uses the shared `MenuItemButton` and the live owner props
+(`GitActionSlotProps`, publicly exported by
+`dsh-better-sidebar/client/service`). Its target is the slot owner's
+`scope` / `worktree` / `repoRoot`, never a header session id. It is disabled
+while the owner's `busy` is true or no changes exist; staged, unstaged and
+untracked changes all remain supported. Selection closes More before starting
+and runs session creation through `props.runAction`, which owns mutual exclusion,
+error reporting and refresh after success even when the menu item unmounts.
+No dialog is opened by this action; the preset configuration dialog is unrelated
+and remains outside the Git menu.
+
+The existing reserved session prefix, workspace grouping, stored default model,
+prompt-language choice and automatic planning-prompt submission are unchanged.
+The client stays a hand-written lazy-CJS bundle: it does not runtime-import
+better-sidebar (nor add a TypeScript-only dependency just for its props type).
+The platform supplies `@deepseek-ai/dsh-client-ui-primitives` at runtime.
+Slot injection manages owner arrival, teardown and re-registration. On older
+better-sidebar versions without this slot, the Git menu entry is unavailable;
+the plugin's tools, plan views and preset configuration remain available. There
+is deliberately no legacy fallback that could duplicate the new menu entry.
+
 ### Session grouping (工作区归属)
 
 DSH's sidebar groups sessions by **Workspace membership**, not by working

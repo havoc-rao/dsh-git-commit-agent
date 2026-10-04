@@ -84,6 +84,11 @@ async function loadBundle(): Promise<{ exports: Record<string, unknown>; registr
   const react = fakeReact()
   const exports = cachedRegistration.factory((spec: string) => {
     if (spec === 'react') return react
+    if (spec === '@deepseek-ai/dsh-client-ui-primitives') return {
+      MenuItemButton: (props: Record<string, unknown>) => ({
+        type: 'button', props: { ...props, role: 'menuitem', onClick: props['onSelect'] },
+      }),
+    }
     throw new Error(`unexpected require(${spec})`)
   })
   return { exports, registration: cachedRegistration }
@@ -187,7 +192,8 @@ function fakeCtx(options: {
   const sidebar = {
     features: options.features ?? ['gitCommitActions', 'planDiff'],
     registerGitCommitAction(descriptor: Record<string, unknown>) {
-      actions.push(descriptor)
+      void descriptor
+      throw new Error('legacy registry must never be called')
       return () => undefined
     },
     openTab(seed: Record<string, unknown>, scope?: Record<string, unknown>) {
@@ -246,13 +252,18 @@ function fakeCtx(options: {
       return services[name]
     },
     slots: {
-      inject(_key: string, factory: () => Generator<unknown>) {
-        const iterator = factory()
-        for (const yielded of iterator) void yielded
+      inject(key: string, factory: () => Generator<unknown> | (() => void)) {
+        if (key === 'betterSidebar.git.actions' && options.withSidebar === false) return () => undefined
+        const result = factory()
+        if (typeof result !== 'function') for (const yielded of result) void yielded
         return () => undefined
       },
       register(options_: Record<string, unknown>, component: (props: Record<string, unknown>) => unknown) {
-        toolviews.push({ key: String(options_['key'] ?? ''), options: options_, component })
+        if (options_['name'] === 'betterSidebar.git.actions') {
+          actions.push({ ...options_, component: (props: Record<string, unknown>) => component({
+            busy: false, close: () => undefined, runAction: (action: () => Promise<unknown>) => action(), ...props,
+          }) })
+        } else toolviews.push({ key: String(options_['key'] ?? ''), options: options_, component })
         return () => undefined
       },
     },
@@ -287,7 +298,7 @@ test('the bundle registers itself under the package name and exports inject/appl
   assert.equal(typeof exports['apply'], 'function')
 })
 
-test('apply registers the GitLens action with the delivered contract shape', async () => {
+test('apply registers only the native More action slot with the delivered contract shape', async () => {
   const { exports } = await loadBundle()
   const harness = fakeCtx()
   await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
@@ -297,12 +308,118 @@ test('apply registers the GitLens action with the delivered contract shape', asy
   assert.ok(action)
   assert.equal(action['id'], 'dsh-git-commit-agent:plan-and-commit')
   assert.equal(typeof action['order'], 'number')
-  assert.equal(typeof action['available'], 'function')
+  assert.equal(action['name'], 'betterSidebar.git.actions')
   assert.equal(typeof action['component'], 'function')
-  const available = action['available'] as (target: unknown) => boolean
-  assert.equal(available({ status: { isRepo: true } }), true)
-  assert.equal(available({ status: { isRepo: false } }), false)
-  assert.equal(available(null), false)
+  const component = action['component'] as (props: Record<string, unknown>) => unknown
+  assert.equal(component({ status: { isRepo: false } }), null)
+  assert.equal(component({}), null)
+})
+
+test('More closes first and delegates a captured owner action that survives menu unmount', async () => {
+  const { exports } = await loadBundle()
+  const harness = fakeCtx()
+  await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
+  const component = harness.actions[0]?.['component'] as (props: Record<string, unknown>) => unknown
+  const events: string[] = []
+  let captured: (() => Promise<unknown>) | undefined
+  const tree = component({
+    status: { isRepo: true, entries: [{}] }, staged: [],
+    sessionId: 'wrong-header', scope: { sessionId: 'actual-lens' },
+    repoRoot: '/repo', worktree: '/actual-owner-wt', branch: 'owner-branch',
+    close: () => { events.push('close') },
+    runAction: async (action: () => Promise<unknown>) => { events.push('run'); captured = action },
+  })
+  const button = findByType(tree, 'button')
+  assert.equal(button?.props['role'], 'menuitem')
+  const label = button?.props['children'] as Element
+  assert.equal(label.type, 'span')
+  assert.equal(label.props['data-better-sidebar-git-action-label'], '')
+  const [title, subtitle] = label.props['children'] as Element[]
+  assert.equal(title?.type, 'span')
+  assert.equal(title?.props['data-better-sidebar-git-action-title'], '')
+  assert.equal(title?.props['children'], '规划并提交')
+  assert.equal(subtitle?.type, 'span')
+  assert.equal(subtitle?.props['data-better-sidebar-git-action-subtitle'], '')
+  assert.equal(subtitle?.props['children'], 'agent')
+  assert.equal(button?.props['disabled'], false)
+  assert.equal(button?.props['shortcut'], undefined, 'agent is a subtitle, not a keyboard shortcut')
+  await (button?.props['onSelect'] as () => Promise<void>)()
+  assert.deepEqual(events, ['close', 'run'])
+  assert.equal(harness.created.length, 0)
+  assert.ok(captured)
+  await captured()
+  assertCommitSession(harness, { cwd: '/actual-owner-wt' })
+  assert.ok(harness.drafts[0]?.includes('owner-branch'))
+})
+
+test('busy and clean items never close or run even when selected programmatically', async () => {
+  const { exports } = await loadBundle()
+  const harness = fakeCtx()
+  await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
+  const component = harness.actions[0]?.['component'] as (props: Record<string, unknown>) => unknown
+  for (const props of [
+    { busy: true, status: { isRepo: true, entries: [{}] } },
+    { busy: false, status: { isRepo: true, entries: [] } },
+  ]) {
+    const tree = component({ ...props, worktree: '/repo', staged: [],
+      close: () => assert.fail('disabled action must not close'),
+      runAction: () => assert.fail('disabled action must not run'),
+    })
+    const button = findByType(tree, 'button')
+    assert.equal(button?.props['disabled'], true)
+    assert.equal(button?.props['role'], 'menuitem')
+    assert.equal(button?.props['shortcut'], undefined)
+    const label = button?.props['children'] as Element
+    assert.equal(label.props['data-better-sidebar-git-action-label'], '')
+    const [title, subtitle] = label.props['children'] as Element[]
+    assert.equal(title?.props['children'], '规划并提交')
+    assert.equal(subtitle?.props['children'], 'agent')
+    assert.equal(subtitle?.props['data-better-sidebar-git-action-subtitle'], '')
+    ;(button?.props['onSelect'] as () => void)()
+  }
+  assert.equal(harness.created.length, 0)
+})
+
+test('planning failures reach the owner instead of disappearing with the menu', async () => {
+  const { exports } = await loadBundle()
+  const harness = fakeCtx()
+  await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
+  const component = harness.actions[0]?.['component'] as (props: Record<string, unknown>) => unknown
+  let error: unknown
+  const tree = component({ status: { isRepo: true, entries: [{}] }, staged: [],
+    scope: { sessionId: 'owner' }, close: () => undefined,
+    runAction: async (action: () => Promise<unknown>) => {
+      try { await action() } catch (failure) { error = failure }
+    },
+  })
+  await (findByType(tree, 'button')?.props['onSelect'] as () => Promise<void>)()
+  assert.match(String(error), /找不到目标 worktree/)
+})
+
+test('slot waits for its owner and returns the registration disposer on remount', async () => {
+  const { exports } = await loadBundle()
+  const harness = fakeCtx()
+  let factory: (() => (() => void)) | undefined
+  let registrations = 0
+  let disposals = 0
+  harness.ctx['slots'] = {
+    inject(name: string, callback: () => (() => void)) {
+      if (name === 'betterSidebar.git.actions') factory = callback
+      return () => undefined
+    },
+    register(options: Record<string, unknown>) {
+      assert.equal(options['name'], 'betterSidebar.git.actions')
+      registrations += 1
+      return () => { disposals += 1 }
+    },
+  }
+  await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
+  assert.ok(factory)
+  assert.equal(registrations, 0)
+  factory()()
+  factory()()
+  assert.equal(registrations, 2)
+  assert.equal(disposals, 2)
 })
 
 test('the button is usable with any working-tree change, staged or not', async () => {
@@ -482,11 +599,11 @@ test('a missing sidebar degrades to tools-only without throwing', async () => {
   assert.ok(harness.toolviews.some((t) => t.options['name'] === 'settings.agentPreset.card.action'))
 })
 
-test('an older sidebar without the feature flag is not used', async () => {
+test('native registration does not depend on the legacy feature flag', async () => {
   const { exports } = await loadBundle()
   const harness = fakeCtx({ features: ['badge'] })
   await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
-  assert.equal(harness.actions.length, 0)
+  assert.equal(harness.actions.length, 1)
 })
 
 test('the plan card renders summary, details, exclusions and a versioned proposed diff', async () => {

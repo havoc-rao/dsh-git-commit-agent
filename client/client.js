@@ -25,6 +25,7 @@ window.__ModuleLoader__.load({
   id: 'dsh-git-commit-agent',
   factory: (require) => {
     const React = require('react')
+    const { MenuItemButton } = require('@deepseek-ai/dsh-client-ui-primitives')
     const h = React.createElement
     const exports = {}
 
@@ -1052,78 +1053,38 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** The GitLens commit-row button. */
+    /** Native More-menu contribution. All async UI belongs to the owner,
+     * so closing/unmounting this menu item cannot lose errors or reset busy. */
     function CommitAction(props) {
-      const [busy, setBusy] = React.useState(false)
-      const [error, setError] = React.useState(null)
       const status = props.status && typeof props.status === 'object' ? props.status : {}
+      if (!status.isRepo) return null
       const entries = Array.isArray(status.entries) ? status.entries : null
       const staged = Array.isArray(props.staged) ? props.staged : []
-      const isRepo = Boolean(status.isRepo)
-      // Any working-tree change enables the flow — with an empty index the
-      // plan itself stages the files before committing (the executor
-      // materializes each commit group from the plan's change records), so the
-      // entry must not require pre-staged content. `entries` is the host's
-      // full status snapshot (staged + unstaged + untracked); hosts without it
-      // fall back to the explicit staged list.
+      // An empty index is valid: the approved plan stages changes itself.
       const hasChanges = entries !== null ? entries.length > 0 : staged.length > 0
-      const disabled = busy || !isRepo || !hasChanges
-      const onClick = function () {
-        setBusy(true)
-        setError(null)
-        Promise.resolve(props.start()).catch(function (failure) {
-          setError(String((failure && failure.message) || failure))
-        }).then(function () {
-          setBusy(false)
-        })
-      }
-      // The button is icon-only, so the tooltip and the accessible name carry
-      // the whole message, including why it is disabled.
-      const title = busy
+      const disabled = Boolean(props.busy) || !hasChanges
+      const title = props.busy
         ? '正在打开规划会话…'
-        : !isRepo
-          ? '当前不是 git 仓库'
-          : !hasChanges
-            ? '没有待提交的变更'
-            : staged.length === 0
-              ? '规划并提交这些变更（未暂存的变更将纳入计划）'
-              : '在新会话中规划并提交这些变更'
-      return h(
-        'div',
-        { className: 'dsh-gca-action' },
-        h(
-          'button',
-          {
-            type: 'button',
-            onClick: onClick,
-            disabled: disabled,
-            className: 'dsh-gca-icon-button',
-            title: title,
-            'aria-label': title,
-            'aria-busy': busy ? 'true' : undefined,
-          },
-          // The Git commit glyph: a commit node on the commit line. This button
-          // plans a sequence of commits, so it borrows that shape.
-          h(
-            'svg',
-            {
-              width: 14,
-              height: 14,
-              viewBox: '0 0 16 16',
-              fill: 'none',
-              stroke: 'currentColor',
-              strokeWidth: 1.5,
-              strokeLinecap: 'round',
-              'aria-hidden': 'true',
-              focusable: 'false',
-            },
-            h('line', { x1: 1, y1: 8, x2: 4.7, y2: 8 }),
-            h('circle', { cx: 8, cy: 8, r: 3.3 }),
-            h('line', { x1: 11.3, y1: 8, x2: 15, y2: 8 }),
-          ),
-        ),
-        error !== null ? h('span', { className: 'dsh-gca-error' }, error) : null,
-      )
+        : !hasChanges
+          ? '没有待提交的变更'
+          : staged.length === 0
+            ? '规划并提交这些变更（未暂存的变更将纳入计划）'
+            : '在新会话中规划并提交这些变更'
+      return h(MenuItemButton, {
+        disabled: disabled,
+        title: title,
+        'aria-label': title,
+        onSelect: function () {
+          if (disabled) return
+          props.close()
+          // Capture the actual slot owner (scope/worktree), never header state.
+          // runAction owns mutual exclusion, errors and refresh after success.
+          return props.runAction(props.start)
+        },
+      }, h('span', { 'data-better-sidebar-git-action-label': '' },
+        h('span', { 'data-better-sidebar-git-action-title': '' }, '规划并提交'),
+        h('span', { 'data-better-sidebar-git-action-subtitle': '' }, 'agent'),
+      ))
     }
 
     /** Read the plan summary the host attached to a tool result. */
@@ -1755,28 +1716,25 @@ window.__ModuleLoader__.load({
           return function () { stop(); planSidebar.dispose() }
         })
       }
-      const features = sidebar && Array.isArray(sidebar.features) ? sidebar.features : []
-      if (sidebar && typeof sidebar.registerGitCommitAction === 'function' && features.indexOf('gitCommitActions') >= 0) {
-        sidebar.registerGitCommitAction({
-          id: ACTION_ID,
-          order: 50,
-          available: function (target) {
-            return Boolean(target && target.status && target.status.isRepo)
-          },
-          component: function (props) {
+      // No legacy registry registration: the root slot handles late arrival,
+      // teardown and remount, and contributes exactly one item in More.
+      if (ctx.slots && typeof ctx.slots.inject === 'function') {
+        ctx.slots.inject('betterSidebar.git.actions', function () {
+          return ctx.slots.register({
+            name: 'betterSidebar.git.actions',
+            id: ACTION_ID,
+            order: 50,
+          }, function (props) {
             return h(CommitAction, {
-              status: props.status,
-              staged: props.staged,
-              start: function () {
-                return startPlanning(ctx, props)
-              },
+              ...props,
+              start: function () { return startPlanning(ctx, props) },
             })
-          },
+          })
         })
-      } else if (sidebar === undefined || sidebar === null) {
-        // The sidebar is optional; the plugin degrades to tools-only.
+      }
+      if (sidebar === undefined || sidebar === null) {
         if (ctx.logger && typeof ctx.logger.info === 'function') {
-          ctx.logger.info('dsh-git-commit-agent: betterSidebar is unavailable, the GitLens entry is not registered')
+          ctx.logger.info('dsh-git-commit-agent: betterSidebar is unavailable, the Git action slot waits for its owner')
         }
       }
 
