@@ -331,7 +331,7 @@ search for **在当前工作区启动 Commit Agent** / **Start Commit Agent in C
 (command ID `dsh-git-commit-agent.start-current-workspace`). The entry follows the
 CMD descriptor protocol: independent `localizedTitles` for the command and its
 **Git 提交助手 / Git Commit Agent** plugin tag (stable tag ID
-`dsh-git-commit-agent`), a `git` identity icon and a `create` action icon for
+`dsh-git-commit-agent`), a `git` identity icon and a robot (🤖) action icon for
 creating the planning session. Both languages are searchable regardless of the
 active locale; the palette owns bilingual display and fuzzy matching. The
 single-language `title` remains a dynamic fallback for older palette versions.

@@ -585,7 +585,7 @@ window.__ModuleLoader__.load({
               title: copy.title, category: copy.category,
               localizedTitles: COMMIT_PALETTE_TITLES,
               pluginTag: COMMIT_PALETTE_TAG,
-              iconId: 'create',
+              icon: '🤖',
               aliases: ['commit', 'agent', 'git', '提交', '规划并提交'],
               disabledReason: denied(),
             }

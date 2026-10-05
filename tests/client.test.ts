@@ -1585,8 +1585,8 @@ test('palette exposes bilingual plugin tag, titles and semantic action icon dyna
     id: 'dsh-git-commit-agent', title: 'Git Commit Agent',
     localizedTitles: { zh: 'Git 提交助手', en: 'Git Commit Agent' }, iconId: 'git',
   })
-  assert.equal(zh.iconId, 'create')
-  assert.equal(zh.icon, undefined, 'semantic icons are not literal text or SVG')
+  assert.equal(zh.iconId, undefined)
+  assert.equal(zh.icon, '🤖', 'the start command uses a robot icon')
   for (const locale of ['en', 'en-US', 'en_US']) {
     p.setLocale(locale)
     const en = p.command.describe()
