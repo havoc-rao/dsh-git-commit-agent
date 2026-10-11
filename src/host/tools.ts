@@ -45,7 +45,7 @@ import type { ContentBlock, HostScopedContext, HostToolDefinition, HostToolRunCo
  * preallocates an id with this prefix through `ISessions.create({ sessionId })`
  * and the host half installs the dedicated tools into exactly those agent scopes.
  *
- * Kept in sync by hand with `client/client.js` (the client bundle cannot import
+ * Kept in sync by hand with the `src/client` session modules (the client bundle cannot import
  * this module); `tests/client.test.ts` locks the two constants together.
  */
 export const COMMIT_AGENT_SESSION_PREFIX = 'session-git-commit-'
@@ -81,7 +81,7 @@ export interface ToolDependencies {
    * Ask the human to approve one exact plan revision.
    *
    * Supplied by the host integration (the DSH `approval` service, see
-   * `src/index.ts` `requestPlanApproval`). When absent, the apply tool reports
+   * `src/host/approval.ts` `requestPlanApproval`). When absent, the apply tool reports
    * that interactive approval is unavailable instead of approving anything by
    * itself.
    */

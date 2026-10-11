@@ -1,0 +1,504 @@
+/**
+ * dsh-git-commit-agent — host plugin entry.
+ *
+ * A Cordis plugin (`apply(ctx, config)`) that mounts the commit-agent service,
+ * installs the restricted tool surface into commit sessions only, and exposes a
+ * small business API other plugins (for example the GitLens entry in
+ * DSH-better-sidebar) call to open a task, approve one plan revision, execute
+ * it, or navigate to the session.
+ *
+ * Packaging follows the verified DSH contract: `package.json.dsh.bundle.patch`
+ * plus a `cordis.patch.yml` insert row. There is no `dsh.plugin.json` contract
+ * in the verified DSH checkout.
+ */
+import { randomUUID } from 'node:crypto'
+import { CommitAgentService, defaultDataDir } from '../core/service.js'
+import { resolvePromptLanguage } from '../shared/config.js'
+import { GitCommitError } from '../core/errors.js'
+import {
+  buildCommitAgentTools,
+  COMMIT_AGENT_SESSION_PREFIX,
+  COMMIT_AGENT_TOOL_NAMES,
+  installCommitAgentScope,
+  isCommitAgentSession,
+  type ToolDependencies,
+} from './tools.js'
+import { EditCapabilityController } from './edit-capability.js'
+import { mountPlanHttpRoutes } from './plan-http.js'
+import {
+  buildCommitAgentSystemPrompt,
+  buildInitialPlanRequest,
+  createDedicatedCommitSession,
+  requestInitialPlan,
+  resumeDedicatedCommitSession,
+  type DedicatedSession,
+  type DedicatedSetup,
+  type UserMessageFactory,
+} from './session.js'
+import type {
+  HostAgent,
+  HostAgentPresetRegistry,
+  HostAgentRegistry,
+  HostApprovalService,
+  HostPluginContext,
+  HostScopedContext,
+  HostSessionStore,
+  HostSettingsForms,
+  HostWorkspaceRegistry,
+} from './types.js'
+import type { CommitAgentConfig, CommitAgentPlugin, GitCommitAgentApi } from './api.js'
+import { requestPlanApproval } from './approval.js'
+import { readStoredDefaultModel, readStoredPromptLanguage } from './settings.js'
+
+/** Plugin name, matching the cordis row and package name. */
+export const name = 'dsh-git-commit-agent'
+
+/**
+ * Agent-preset identity this plugin registers into the host's preset registry.
+ *
+ * The preset appears in the settings roster (AgentPresetSection) and is what
+ * dedicated sessions are bound to and recorded under (`meta.agentPreset`). Its
+ * composition supplies native filesystem tools only: Git capabilities are installed
+ * by this plugin's `agent/created` + session-prefix path, and declaring the
+ * plugin as a composition row would double-mount it inside the preset scope and
+ * fail the registry's service-leak audit.
+ */
+export const COMMIT_AGENT_PRESET_ID = 'git-commit'
+
+/** Services required before mounting. */
+export const inject = ['tools']
+
+/**
+ * Build the plugin without mounting it. Useful for tests and for hosts that
+ * wiring services explicitly.
+ */
+export function createCommitAgentPlugin(
+  options: CommitAgentConfig & {
+    readonly agents?: HostAgentRegistry
+    /**
+     * Lazy agent-registry lookup. Preferred over `agents`: it is resolved at
+     * call time, so the plugin does not depend on `ctx.agents` being injectable
+     * (or even present) at mount time.
+     */
+    readonly resolveAgents?: () => HostAgentRegistry | undefined
+    /**
+     * Lazy agent-preset lookup, resolved at call time like `resolveAgents`.
+     * When it yields a registry, dedicated sessions are bound to
+     * {@link COMMIT_AGENT_PRESET_ID} at create/resume time (`setup` +
+     * `agentPresets.mount`, the webhook session creator's pattern) and the
+     * session header records the preset. A missing registry or a failed mount
+     * degrades to today's unbound behavior — binding never fails session
+     * creation.
+     */
+    readonly resolveAgentPresets?: () => HostAgentPresetRegistry | undefined
+    /**
+     * Lazy settings lookup, resolved at call time like `resolveAgents`. When
+     * it yields a settings service, the prompt-language preference is read
+     * from this plugin's own namespace for each newly admitted session. A
+     * missing service degrades to the default language.
+     */
+    readonly resolveSettings?: () => HostSettingsForms | undefined
+    /**
+     * Where mount failures are reported. Absent on embedder-created plugins
+     * (binding then stays fully silent); `apply` passes `ctx.logger` so live
+     * hosts see the reason while session creation still proceeds unbound.
+     */
+    readonly logger?: { readonly warn?: (message: string, ...rest: unknown[]) => void }
+    readonly newSessionId?: () => string
+    readonly createUserMessage?: UserMessageFactory
+    /**
+     * Best-effort host hook that attaches a freshly created session to the
+     * Workspace that owns `workspacePath`, so the sidebar groups it under the
+     * original workspace instead of the Ungrouped bucket. A missing registry or
+     * an unattachable path is a no-op; grouping must never fail session creation.
+     */
+    readonly attachWorkspaceSession?: (sessionId: string, workspacePath: string) => Promise<void>
+  } = {},
+): CommitAgentPlugin {
+  const service = new CommitAgentService({
+    dataDir: options.dataDir ?? defaultDataDir(),
+    ...(options.lockDir === undefined ? {} : { lockDir: options.lockDir }),
+  })
+  const sessions = new Map<string, DedicatedSession>()
+  const newSessionId =
+    options.newSessionId ?? (() => `${COMMIT_AGENT_SESSION_PREFIX}${randomUUID()}`)
+
+  const requireAgents = (): HostAgentRegistry => {
+    const agents = options.resolveAgents?.() ?? options.agents
+    if (agents === undefined) {
+      throw new GitCommitError(
+        'INTERNAL',
+        'no agent registry is available: the host did not provide an "agents" service',
+      )
+    }
+    return agents
+  }
+
+  /**
+   * Setup that binds a dedicated session to {@link COMMIT_AGENT_PRESET_ID},
+   * mirroring the webhook session creator (`webhook/src/session.ts:139-142`).
+   *
+   * Binding is metadata plus the standing composition; the dedicated tools arrive
+   * through the `agent/created` listener regardless, so a missing registry or
+   * a failed mount must never fail session creation — the session then simply
+   * stays unbound, exactly like before this registration existed.
+   */
+  const bindAgentPreset = async (agentCtx: HostScopedContext): Promise<void> => {
+    const agentPresets = options.resolveAgentPresets?.()
+    if (agentPresets === undefined || typeof agentPresets.mount !== 'function') return
+    try {
+      await agentPresets.mount(agentCtx, COMMIT_AGENT_PRESET_ID)
+    } catch (error) {
+      options.logger?.warn?.(
+        `dsh-git-commit-agent: session stays without an agent preset: `
+        + (error instanceof Error ? error.message : String(error)),
+      )
+    }
+  }
+  const presetBindingSetup = (): DedicatedSetup | undefined => {
+    const agentPresets = options.resolveAgentPresets?.()
+    return agentPresets !== undefined && typeof agentPresets.mount === 'function' ? bindAgentPreset : undefined
+  }
+
+  const promptLanguage = (): 'zh' | 'en' => resolvePromptLanguage(readStoredPromptLanguage(options.resolveSettings?.()), 'en')
+
+  /**
+   * Model route for a dedicated session, in precedence order:
+   *
+   * 1. the **stored settings preference** (the user's explicit choice in the
+   *    preset-card configure surface) — it overrides the deployment row;
+   * 2. the deployment `agentOptions` row (other fields such as
+   *    `reasoningEffort` / `maxTokens` are preserved), when no preference is
+   *    stored;
+   * 3. nothing — the host default model applies.
+   */
+  const resolveAgentOptions = (): CommitAgentConfig['agentOptions'] | undefined => {
+    const stored = readStoredDefaultModel(options.resolveSettings?.())
+    if (stored === undefined) return options.agentOptions
+    return { ...options.agentOptions, provider: stored.provider, model: stored.model }
+  }
+
+  const api: GitCommitAgentApi = {
+    toolNames: COMMIT_AGENT_TOOL_NAMES,
+
+    async openTask(input) {
+      const state = await service.openTask(input)
+      return { taskId: state.task.taskId, snapshot: state.snapshot, plans: state.plans }
+    },
+
+    async getState(taskId, opts = {}) {
+      const state = await service.getState(taskId, opts)
+      return { taskId, target: state.task.target, snapshot: state.snapshot, plans: state.plans }
+    },
+
+    async publishPlan(taskId, draft, opts = {}) {
+      const published = await service.publishPlan(taskId, draft, opts)
+      return { plan: published.plan, preview: published.preview }
+    },
+
+    approvePlan: (input) => service.approvePlan(input),
+    withdrawApproval: (taskId, planId, revision) => service.withdrawApproval(taskId, planId, revision),
+    executePlan: (input) => service.executePlan(input),
+    cancel: (taskId) => service.cancel(taskId),
+    reconcile: (taskId, planId, revision, signal) => service.reconcile(taskId, planId, revision, signal),
+
+    async startDedicatedSession(input) {
+      const agents = requireAgents()
+      // Make sure the data directory is usable *before* creating a session, so
+      // a bad dataDir cannot leave an orphaned session behind.
+      await service.init()
+      // The five tools are installed by the `agent/created` listener in
+      // `apply`, matched on the reserved session-id prefix that `newSessionId`
+      // mints. No tool is installed here — a session created by the plugin and
+      // one created by the GitLens button take the exact same tool path. The
+      // only thing added here is the preset binding (`setup` + header record);
+      // it is metadata, never the tool surface.
+      const setup = presetBindingSetup()
+      // The stored default-model preference wins over the deployment row; an
+      // absent preference delegates to the row, and an absent row leaves the
+      // host default untouched (`resolveAgentOptions`).
+      const agentOptions = resolveAgentOptions()
+      const session = await createDedicatedCommitSession({
+        agents,
+        newSessionId,
+        workspacePath: input.workspacePath,
+        ...(agentOptions === undefined ? {} : { agentOptions }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+        ...(setup === undefined ? {} : { agentPresetId: COMMIT_AGENT_PRESET_ID }),
+      }, ...(setup === undefined ? [] : [setup]))
+      sessions.set(session.sessionId, session)
+      // Group the session under the Workspace that owns its directory. The
+      // sidebar groups by Workspace membership, not by cwd, so a session that is
+      // never attached lands in 未分组 even when its cwd is a registered
+      // Workspace. Grouping is cosmetic: a failure here must not block planning.
+      if (options.attachWorkspaceSession !== undefined) {
+        await options.attachWorkspaceSession(session.sessionId, input.workspacePath).catch(() => undefined)
+      }
+      const state = await service.openTask({
+        sourceSessionId: input.sourceSessionId,
+        agentSessionId: session.sessionId,
+        workspaceRoot: input.workspacePath,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      })
+      const prompt = buildInitialPlanRequest({
+        taskId: state.task.taskId,
+        worktreePath: state.task.target.worktreePath,
+        branch: state.snapshot.head.branch,
+        head: state.snapshot.head.commit,
+        snapshot: state.snapshot,
+        indexEmpty: state.snapshot.indexEmpty,
+        ...(input.userConstraints === undefined ? {} : { userConstraints: input.userConstraints }),
+      }, promptLanguage())
+      await requestInitialPlan(
+        session.handle,
+        prompt,
+        ...(options.createUserMessage === undefined ? [] : [options.createUserMessage]),
+      )
+      return { sessionId: session.sessionId, taskId: state.task.taskId, prompt }
+    },
+
+    async resumeDedicatedSession(resumeSessionId) {
+      const agents = requireAgents()
+      const setup = presetBindingSetup()
+      const session = await resumeDedicatedCommitSession(
+        { agents, resumeSessionId },
+        ...(setup === undefined ? [] : [setup]),
+      )
+      sessions.set(session.sessionId, session)
+      return session
+    },
+
+    systemPrompt: () => buildCommitAgentSystemPrompt(promptLanguage()),
+  }
+
+  return {
+    api,
+    service,
+    async dispose() {
+      for (const session of sessions.values()) {
+        await session.handle.dispose().catch(() => undefined)
+      }
+      sessions.clear()
+    },
+  }
+}
+
+/** Mount the plugin: register tools and expose the business API on the context. */
+export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlugin {
+  const options = (config ?? {}) as CommitAgentConfig
+
+  /**
+   * Resolve a host service lazily.
+   *
+   * `ctx.agents` (property access) throws `cannot get property "agents" without
+   * inject` when `agents` is not declared in `inject` and its provider is a
+   * sibling row — verified on a live host, and it aborted the whole boot. `get`
+   * returns `undefined` instead (`vendor/cordis/src/reflect.ts:233-243`), which
+   * keeps this plugin mountable on hosts without an agent registry and removes
+   * any ordering dependency on the `agents` row.
+   */
+  const getService = <T>(name: string): T | undefined => {
+    const get = ctx.get
+    if (typeof get !== 'function') return undefined
+    return get.call(ctx, name) as T | undefined
+  }
+
+  const plugin = createCommitAgentPlugin({
+    ...options,
+    resolveAgents: () => getService<HostAgentRegistry>('agents'),
+    resolveAgentPresets: () => getService<HostAgentPresetRegistry>('agentPresets'),
+    resolveSettings: () => getService<HostSettingsForms>('settings'),
+    logger: ctx.logger,
+    /**
+     * Attach a newly created dedicated session to the Workspace that owns its
+     * directory. Without this the session has a cwd but no Workspace
+     * membership, and the sidebar's workspace tree shows it under 未分组
+     * (`ui-workspace/src/client/tree.ts` `owningGroupKey`).
+     */
+    attachWorkspaceSession: async (sessionId, workspacePath) => {
+      const registry = getService<HostWorkspaceRegistry>('workspaceRegistry')
+      if (registry === undefined || typeof registry.resolveByPath !== 'function') return
+      const workspace = await registry.resolveByPath(workspacePath)
+      if (workspace === undefined || typeof workspace.attachSession !== 'function') return
+      try {
+        await workspace.attachSession(sessionId)
+      } catch (error) {
+        ctx.logger?.warn?.(
+          `dsh-git-commit-agent: session ${sessionId} stays ungrouped: `
+          + (error instanceof Error ? error.message : String(error)),
+        )
+      }
+    },
+  })
+
+  // Dependency-owned HTTP routes use the public host authentication fence;
+  // no routes are exposed at all on hosts without Connection admission.
+  ctx.inject?.(['webServer', 'connection'], (child) => mountPlanHttpRoutes(child, plugin.service))
+
+  const editCapabilities = new EditCapabilityController(plugin.service)
+  const deps: ToolDependencies = {
+    service: plugin.service,
+    editCapabilities,
+    resolveWorkspace: async (agentSessionId) => {
+      if (options.resolveWorkspace !== undefined) return await options.resolveWorkspace(agentSessionId)
+      // Fall back to the live session's authoritative cwd. The only sessions
+      // that ever reach these tools are the commit sessions, whose cwd is the
+      // planned worktree, so this is the same directory the task was opened on.
+      const sessions = getService<HostSessionStore>('sessions')
+      const cwd = sessions?.get?.(agentSessionId)?.header?.cwd
+      return typeof cwd === 'string' && cwd !== '' ? cwd : null
+    },
+    ...(options.resolveSourceSession === undefined
+      ? {}
+      : { resolveSourceSession: options.resolveSourceSession }),
+    askUserApproval: async (prompt) => requestPlanApproval(
+      getService<HostApprovalService>('approval'),
+      prompt,
+    ),
+  }
+
+  const definitions = buildCommitAgentTools(deps)
+
+  /**
+   * Install the dedicated tools into one commit-agent session.s scope.
+   *
+   * `agent/created` is emitted while the agent is being registered — before
+   * `agent/session-start` and the first prompt assembly — for both `create` and
+   * `resume`, so a session created by the GitLens button and one created
+   * through the business API take the exact same path. The reserved session-id
+   * prefix is the whole contract, because it is the only thing the host knows
+   * about a session the client created (see `COMMIT_AGENT_SESSION_PREFIX`).
+   *
+   * Nothing is registered on the plugin's own context: a global registration
+   * would put the tools in every session's model surface.
+   */
+  const installed = new Map<string, () => void>()
+  const installAgent = (agent: HostAgent | undefined): void => {
+    if (agent === undefined || installed.has(agent.id) || !isCommitAgentSession(agent.id)) return
+    const agentCtx = agent.ctx
+    if (agentCtx === undefined) return
+    try {
+      installed.set(agent.id, installCommitAgentScope(agentCtx, definitions, {
+        controller: editCapabilities,
+        sessionId: agent.session.id,
+      }))
+    } catch (error) {
+      // Installation failure must not leave an ordinary coding tool surface exposed.
+      installed.set(agent.id, agentCtx.tools.guard(() => 'commit agent capability installation failed; denying all tools'))
+      ctx.logger?.warn?.(
+        `dsh-git-commit-agent: could not install tools for ${agent.id}: `
+        + (error instanceof Error ? error.message : String(error)),
+      )
+    }
+  }
+  const uninstallAgent = (agent: HostAgent | undefined): void => {
+    if (agent === undefined) return
+    installed.get(agent.id)?.()
+    installed.delete(agent.id)
+    editCapabilities.disposeSession(agent.session.id)
+  }
+  const payloadAgent = (payload: unknown): HostAgent | undefined =>
+    (payload as { agent?: HostAgent } | undefined)?.agent
+
+  // Sessions that already exist when the plugin mounts (a late row, or HMR).
+  for (const agent of getService<HostAgentRegistry>('agents')?.list?.() ?? []) installAgent(agent)
+  ctx.on?.('agent/created', (payload) => installAgent(payloadAgent(payload)))
+  ctx.on?.('agent/disposed', (payload) => uninstallAgent(payloadAgent(payload)))
+
+  if (typeof ctx.provide === 'function') ctx.provide('gitCommitAgent', plugin.api)
+  ctx.logger?.info?.('dsh-git-commit-agent mounted')
+
+  /**
+   * Register this agent as a DSH agent preset, the standard way.
+   *
+   * The registry is the host's single roster: the settings page
+   * (`ui-agent-preset` AgentPresetSection) renders `agentPresets.list()`, so
+   * an entry here appears as a card that can be viewed and set as the default
+   * with zero client changes. Registration is the same call the declarative
+   * `@deepseek-ai/dsh-agent-preset` plugin wraps, just executed from the
+   * plugin's own mount so the definition cannot drift from this plugin's code.
+   *
+   * The composition is empty on purpose — see {@link HostPresetDefinition}.
+   * The registry is optional: a host without the preset package simply has no
+   * roster, and a duplicate id (a second mount of this plugin, HMR) means the
+   * earlier registration already owns the entry.
+   */
+  const registerPreset = (owner: HostPluginContext, agentPresets: HostAgentPresetRegistry): void => {
+    let retired = false
+    let unregister: (() => Promise<void>) | undefined
+    const release = (dispose: () => Promise<void>): void => {
+      void dispose().catch((error: unknown) => {
+        ctx.logger?.warn?.(`dsh-git-commit-agent: preset disposal failed: ${String(error)}`)
+      })
+    }
+    owner.effect?.(() => () => {
+      retired = true
+      if (unregister !== undefined) release(unregister)
+      unregister = undefined
+    })
+    void agentPresets
+      .register({
+        id: COMMIT_AGENT_PRESET_ID,
+        name: 'Git Commit Agent',
+        description:
+          'Dedicated Git commit planning and execution agent: analyses status and diff, materialises an exact '
+          + 'add/commit plan, binds your approval to one plan revision, and runs a restricted git executor.',
+        order: 30,
+        // Tool-only standing contribution: reuses host fs and observation policy,
+        // never remounts this plugin's service inside the preset.
+        plugins: [{ id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs' }],
+      })
+      .then((dispose) => {
+        if (retired) {
+          release(dispose)
+          return
+        }
+        unregister = dispose
+        ctx.logger?.info?.(`dsh-git-commit-agent: preset ${COMMIT_AGENT_PRESET_ID} registered`)
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error)
+        if (message.includes('Duplicate agent preset')) {
+          ctx.logger?.info?.(`dsh-git-commit-agent: preset ${COMMIT_AGENT_PRESET_ID} already registered`)
+        } else {
+          ctx.logger?.warn?.(`dsh-git-commit-agent: preset registration failed: ${message}`)
+        }
+      })
+  }
+
+  // Cordis activation is asynchronous: patch order is not service readiness.
+  // Let a dependency-owned child wait for the registry and own its registration.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['agentPresets'], (child) => {
+      const registry = child.agentPresets
+      if (registry === undefined) throw new Error('agentPresets injection resolved without its service')
+      registerPreset(child, registry)
+    })
+    // Following the locale template (`packages/client/locale`): opt this
+    // entry out of an auto-generated settings page while keeping its volatile
+    // fields editable through the forms/slots pipeline.
+    ctx.inject(['settings'], (child) => {
+      const declared = child.settings?.configure?.({ auto: false }, ctx.fiber)
+      if (declared !== undefined) child.effect?.(() => declared)
+    })
+  } else {
+    // Minimal embedders without Cordis injection retain one-shot compatibility.
+    const registry = getService<HostAgentPresetRegistry>('agentPresets')
+    if (registry !== undefined && typeof registry.register === 'function') registerPreset(ctx, registry)
+    else ctx.logger?.info?.('dsh-git-commit-agent: no agentPresets service; preset registration skipped')
+  }
+
+  ctx.effect?.(() => () => {
+    for (const dispose of installed.values()) dispose()
+    installed.clear()
+    editCapabilities.dispose()
+    void plugin.dispose()
+  })
+
+  // NOTE: Cordis invokes `export function apply` through `new` and discards the
+  // returned value, so returning the plugin is safe for embedders/tests. This
+  // relies on `apply` remaining a *function declaration*: an arrow function or
+  // method shorthand that returns an object would make Cordis treat the return
+  // value as an effect and fail with `Invalid effect`.
+  return plugin
+}

@@ -8,28 +8,27 @@
   "engines": {
     "node": ">=20"
   },
-  "main": "./lib/src/index.js",
-  "types": "./lib/src/index.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./lib/src/index.d.ts",
-      "default": "./lib/src/index.js"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     },
     "./client": {
-      "default": "./client/client.js"
+      "default": "./dist/client/index.js"
     },
     "./core": {
-      "types": "./lib/src/core/index.d.ts",
-      "default": "./lib/src/core/index.js"
+      "types": "./dist/core/index.d.ts",
+      "default": "./dist/core/index.js"
     },
     "./package.json": "./package.json"
   },
   "files": [
-    "lib/src",
-    "client",
+    "dist",
     "cordis.patch.yml",
     "README.md",
-    "PLAN.md"
+    "docs"
   ],
   "dsh": {
     "bundle": {
@@ -43,14 +42,17 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "clean": "rm -rf lib",
-    "inject:dev": "NODE_ENV=development node node_modules/@havocrao/dsh-code-finder/bin/code-finder.js instrument client --write",
-    "inject:revert": "git checkout -- client/client.js",
-    "prepack": "npm run build",
-    "test": "npm run build && node --test --test-concurrency=1 \"lib/tests/*.test.js\"",
-    "test:unit": "node --test --test-concurrency=1 \"lib/tests/*.test.js\"",
+    "build": "npm run build:host && npm run build:client",
+    "build:host": "tsc -p tsconfig.json",
+    "build:client": "node scripts/build-client.mjs",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "clean": "node scripts/clean.mjs",
+    "inject:dev": "npm run build:client && NODE_ENV=development node node_modules/@havocrao/dsh-code-finder/bin/code-finder.js instrument dist/client --write",
+    "inject:revert": "npm run build:client",
+    "prepack": "npm run clean && npm run build",
+    "test": "npm run build && npm run build:test && npm run test:unit",
+    "build:test": "tsc -p tsconfig.test.json",
+    "test:unit": "node --test --test-concurrency=1 \".build/tests/*.test.js\"",
     "verify": "npm run typecheck && npm run test"
   },
   "peerDependencies": {

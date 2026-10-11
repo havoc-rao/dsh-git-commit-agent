@@ -1,0 +1,27 @@
+/** Plugin-owned Git-badge compositions over platform artwork. */
+const { React, h, IconRobotOutlineRegular, IconQueueOutlineRegular, IconBranchOutlineRegular } = require('./runtime.cjs')
+// Plugin-owned artwork; descriptors retain only serializable, namespaced IDs.
+const ROBOT_GIT_ICON_ID = 'dsh-git-commit-agent.robot-git'
+const MESSAGE_GIT_ICON_ID = 'dsh-git-commit-agent.message-git'
+function GitBadgeIcon(props) {
+  const maskId = React.useId()
+  const Body = props.body
+  if (typeof Body !== 'function' || typeof IconBranchOutlineRegular !== 'function') return null
+  return h('svg', { width: props.size || 16, height: props.size || 16,
+    className: props.className, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' },
+    // These colours are mask luminance only, never visible background paint.
+    // Explicit luminance matters: an alpha mask would keep the opaque black
+    // badge rectangle instead of cutting the body away. Do not paint a
+    // white/theme-coloured badge backing: hover/selected surfaces must show through.
+    h('defs', null, h('mask', { id: maskId, maskUnits: 'userSpaceOnUse',
+      maskContentUnits: 'userSpaceOnUse', style: { maskType: 'luminance' },
+      x: 0, y: 0, width: 16, height: 16 },
+      h('rect', { width: 16, height: 16, fill: 'white', stroke: 'none' }),
+      h('rect', { x: 8, y: 8, width: 8, height: 8, rx: 1, fill: 'black', stroke: 'none' }))),
+    h('g', { mask: 'url(#' + maskId + ')' }, h(Body, { size: 16 })),
+    h('g', { transform: 'translate(8 8) scale(.5)' }, h(IconBranchOutlineRegular, { size: 16 })))
+}
+function RobotGitIcon(props) { return h(GitBadgeIcon, { ...props, body: IconRobotOutlineRegular }) }
+function MessageGitIcon(props) { return h(GitBadgeIcon, { ...props, body: IconQueueOutlineRegular }) }
+
+module.exports = { ROBOT_GIT_ICON_ID, MESSAGE_GIT_ICON_ID, RobotGitIcon, MessageGitIcon }

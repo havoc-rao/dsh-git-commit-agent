@@ -1,5 +1,8 @@
 node_modules/
+# Generated output (lib is the legacy output directory)
 lib/
+dist/
+.build/
 *.tsbuildinfo
 .npm-cache/
 .scratch/

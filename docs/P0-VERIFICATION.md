@@ -1,5 +1,11 @@
 # P0 — Host API verification record
 
+> Historical paths below describe the verified build at the time of the audit.
+> Since the 2026-10-11 layout refactor, `lib/src/index.js` is `dist/index.js`,
+> `client/client.js` is authored under `src/client/` and built as
+> `dist/client/index.js`, and plugin implementation lives under `src/host/`.
+> See the current [architecture](../README.md#architecture).
+
 - Date: 2026-09-14
 - Verified against: local read-only checkout `/Users/havoc/Documents/Projects/tools/deepseek-harness`
 - Host version in that checkout: **`0.1.5-rc.2`** (root `package.json`, and

@@ -13,7 +13,7 @@ import {
   PROMPT_LANGUAGE_IDS,
   PROMPT_LANGUAGE_PATTERN,
   resolvePromptLanguage,
-} from '../src/config.js'
+} from '../src/shared/config.js'
 import { buildCommitAgentSystemPrompt, buildInitialPlanRequest, type PlanPromptInput } from '../src/host/session.js'
 
 test('PROMPT_LANGUAGE_IDS lists exactly the editable choices', () => {

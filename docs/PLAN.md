@@ -285,6 +285,12 @@ git.commit-plan.cancel
 
 第一版不做 push、历史重写、自动回滚已完成提交、自动跳过 hooks、自动修改代码修测试、任意 shell Agent 或跨仓库事务。不实现第二套 chatbox，不编辑 DSH 官方源码和 lib 生成产物。
 
+> **2026-10-11 目录重构说明：** 下方实施记录中的旧路径保留为历史证据。
+> 当前客户端源码位于 `src/client/`，构建入口为 `dist/client/index.js`；
+> 原 `src/config.ts` 已迁入 `src/shared/config.ts`，插件实现已拆到 `src/host/`，
+> `src/index.ts` 仅保留公共导出。发布产物统一为 `dist/`，测试产物为 `.build/`。
+> 当前结构与开发命令以 [README](../README.md#architecture) 为准。
+
 ## 13. 实施状态与设计偏差（2026-09-14 落地）
 
 ### 13.1 阶段完成度

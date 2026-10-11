@@ -14,7 +14,7 @@ import {
   COMMIT_AGENT_DEFAULT_MODEL_FIELD,
   isDefaultModelPreference,
   type DefaultModelPreference,
-} from '../src/config.js'
+} from '../src/shared/config.js'
 
 test('COMMIT_AGENT_DEFAULT_MODEL_FIELD addresses the volatile settings field', () => {
   assert.equal(COMMIT_AGENT_DEFAULT_MODEL_FIELD, 'defaultModel')

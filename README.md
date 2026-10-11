@@ -30,7 +30,7 @@ GitLens entry ──▶ dedicated native session ──▶ status/diff analysis
 | P1 — interactive planning (no real commit) | **done**: dedicated session composition, status/diff/read tools, whole-file plans, versioning, exact preview, old-revision invalidation |
 | P2 — approval + execution loop | **done**: exact approval binding, executor, real add/commit, cancel, partial failure, hooks, reconciliation |
 | P3 — hunk-level splitting, chat approval protocol | not started (by design) |
-| GitLens button + DiffPane plan preview | **implemented** in `client/client.js` against the delivered better-sidebar seams; the boot graph carries the entry and the bundle is served — the browser render itself is not yet verified (see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §8.7) |
+| GitLens button + DiffPane plan preview | **implemented** in `src/client/` against the delivered better-sidebar seams; the boot graph carries the entry and the bundle is served — the browser render itself is not yet verified (see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §8.7) |
 | Live DSH host integration | **verified twice** on 2026-09-14 (headless profile, scratch `DSH_HOME`): bare mount with `inject: ['tools']` only, restricted 8-tool surface, guard denial, session visibility, uninstall disposal and a real commit — see [`docs/P0-VERIFICATION.md`](docs/P0-VERIFICATION.md) §7. The two rounds found and fixed three defects (missing lazy `agents` lookup; `followup` payload shape; default `dataDir` ignoring `DSH_HOME`) |
 | Agent preset registration | **implemented**: the plugin registers itself as the `git-commit` agent preset through the host's `ctx.agentPresets.register()` (the same API the declarative `@deepseek-ai/dsh-agent-preset` plugin wraps), so it appears as a card in Settings → Agent presets; dedicated sessions bind that preset (`meta.agentPreset` + `agentPresets.mount`, the webhook session creator's pattern). Not yet verified on a live host (see [Preset registration](#agent-preset-registration)) |
 
@@ -110,8 +110,11 @@ The command palette offers two independent actions (search `commit` / `提交`):
   and send it manually. It does not create or navigate to another session,
   change the model/preset, install tools, or automatically submit. The prompt
   follows the configured prompt language and asks the agent to use its existing
-  tools to inspect changes, propose commit groups, and wait for explicit approval
-  before staging/committing. This is an ordinary agent conversation, **not** the
+  tools to inspect changes and directly stage/commit under a one-time authorization
+  for this commit task, with a brief result report rather than a lengthy plan or
+  another confirmation round. Ambiguous scope or changes after inspection require
+  clarification; tool approvals remain in force, and amend/push are not authorized.
+  This is an ordinary agent conversation, **not** the
   plugin's revision/digest-bound approval and restricted executor workflow.
 
 Both actions require the current main-view session to belong to a registered
@@ -218,8 +221,8 @@ API) seed a prompt in one language, chosen from a single durable preference:
   so the session reads fluently in the chosen language even though the third
   planes (button labels, approval copy) keep their own translations.
 
-Implementation: `src/config.ts` owns the shared resolver, `src/host/session.ts`
-builds both languages (default `en`), `client/client.js` mirrors the same rules.
+Implementation: `src/shared/config.ts` owns the shared resolver, `src/host/session.ts`
+builds both languages (default `en`), `src/client/` mirrors the same rules.
 Both fields become editable through the preset-card Configure button
 (`settings.agentPreset.card.action` slot).
 
@@ -249,8 +252,8 @@ page renders):
   silently to the host default: model pinning never blocks starting a session.
 
 Implementation: the schema field and the admission-time resolution live in
-`src/index.ts` (`COMMIT_AGENT_DEFAULT_MODEL_FIELD`, `resolveAgentOptions`),
-`src/config.ts` owns the tolerant validator, and `client/client.js` owns the
+`src/host/plugin.ts` (`resolveAgentOptions`) and `src/host/settings.ts` (schema),
+`src/shared/config.ts` owns the tolerant validator, and `src/client/` owns the
 catalog picker and the `selectModel` application.
 
 ## Dynamic native editing (fixed tool surface)
@@ -331,9 +334,19 @@ search for **在当前工作区启动 Commit Agent** / **Start Commit Agent in C
 (command ID `dsh-git-commit-agent.start-current-workspace`). The entry follows the
 CMD descriptor protocol: independent `localizedTitles` for the command and its
 **Git 提交助手 / Git Commit Agent** plugin tag (stable tag ID
-`dsh-git-commit-agent`), a `git` identity icon and a robot (🤖) action icon for
-creating the planning session. Both languages are searchable regardless of the
-active locale; the palette owns bilingual display and fuzzy matching. The
+`dsh-git-commit-agent`). This plugin owns and injects its special artwork via
+`commandPalette.registerIcon(id, Component)`, composing DSH public primitives.
+The start action and shared plugin tag reference
+`iconId: 'dsh-git-commit-agent.robot-git'` (robot + lower-right Git badge).
+The fill-prompt action references `iconId: 'dsh-git-commit-agent.message-git'`
+(message bubble + Git badge), distinguishing composing a request from launching
+an agent. The palette maintains only its generic built-in icons; these two
+special icons are implemented here, not in the palette. Descriptors contain
+only serializable IDs, never React components. Registrations are disposed with
+the commands and rolled back on partial failure. Older palettes without
+`registerIcon` still receive commands but use their unknown-icon fallback. Both
+languages are searchable regardless of the active locale; the palette owns
+bilingual display and fuzzy matching. The
 single-language `title` remains a dynamic fallback for older palette versions.
 It resolves the workspace owning the current main-view session from the public session and
 workspace stores; an ungrouped session or no current session disables the command.
@@ -470,10 +483,11 @@ Either way the flow is the same:
 4. only after your approval does the host execute — the same call then returns
    the execution result (commits landed, or why it stopped).
 
-The client half is one hand-written lazy-CJS file (`client/client.js`): no
-bundler, no JSX, no CSS modules, and no typert Remote — the button uses only
-public client APIs, so it adds no dependency on the host's internal symbol
-tables.
+The client half is authored as small CommonJS modules under `src/client/`.
+A dependency-free build script packages them into one lazy-CJS entry at
+`dist/client/index.js`, preserving the DSH module-loader contract. There is no
+JSX, CSS-module toolchain, or typert Remote — the button uses only public
+client APIs, so it adds no dependency on the host's internal symbol tables.
 
 ## Business API
 
@@ -497,7 +511,10 @@ never from the model. The model's tools cannot reach it.
 ## Architecture
 
 ```
-client/client.js              hand-written lazy-CJS browser half (button + plan cards)
+src/index.ts                 stable public package exports (no implementation)
+src/shared/config.ts         pure preference rules; no host/browser dependency
+src/client/                  browser source modules (not build artifacts)
+src/host/                    DSH adapters and Cordis plugin implementation
 src/core/                     host-agnostic, fully testable
   errors.ts                   coded error taxonomy
   types.ts                    task / snapshot / plan / execution domain model
@@ -511,14 +528,35 @@ src/core/                     host-agnostic, fully testable
   store/store.ts              atomic, append-only task/plan/execution store
   service.ts                  orchestration used by the tools
 src/host/                     structural mirrors of the verified DSH contract
+  plugin.ts                   Cordis apply + service/session lifecycle
+  api.ts                      public business API and configuration types
+  approval.ts                 host approval bridge
+  settings.ts                 volatile schema and host preference access
   types.ts                    host service faces (no compile-time host dependency)
   tools.ts                    the five ToolDefinition objects + per-session scope install
   session.ts                  dedicated normal session, prompts
-src/index.ts                  Cordis plugin: apply(ctx, config) + business API
+  plan-http.ts                read-only plan HTTP routes
+  plan-presentation.ts        persisted plan presentation
+scripts/                      client packaging and safe output cleanup
+tests/                       isolated Node tests and fixture helpers
+tsconfig.json                production TypeScript → dist/
+tsconfig.test.json           test TypeScript → .build/ (never published)
+dist/                        generated package entries and declarations (ignored)
+.build/                      generated test code (ignored)
 ```
 
-Nothing under `src/core/` imports a host package, which is why the whole engine
-is testable with plain Node.
+Dependency direction is `host → core/shared` and `client → browser services`;
+`core` and `shared` never import host or browser adapters. The engine stays
+testable with plain Node. All maintained runtime source is under `src/`;
+`dist/` is exclusively generated output, and the previous root-level `client/`
+and mixed `lib/src` + `lib/tests` layout is no longer used.
+
+The client module map and lazy-loading guarantees are documented in
+[Client architecture](docs/CLIENT-ARCHITECTURE.md).
+
+The public package specifiers remain unchanged: `dsh-git-commit-agent`,
+`dsh-git-commit-agent/core`, and `dsh-git-commit-agent/client`. Consumers should
+use these exports rather than internal output paths.
 
 ## Preview is exact, not approximate
 
@@ -548,8 +586,9 @@ Full model: [`docs/SECURITY.md`](docs/SECURITY.md).
 
 ```sh
 npm install
-npm run verify     # typecheck + build + 89 tests against real isolated git repos
-npm run build
+npm run verify     # typecheck + build + all tests against isolated git repos
+npm run build      # host declarations/JS + the lazy-CJS browser entry
+npm run clean      # removes only generated dist/, .build/, and legacy lib/
 ```
 
 Tests never touch a user repository: every fixture is a fresh temp repo with
@@ -559,28 +598,27 @@ pinned identity, signing disabled and its own hooks path.
 
 `@havocrao/dsh-code-finder` is wired in as a dev dependency so that holding
 **Opt+Shift** and hovering a `CommitAction` / `PlanCard` / `ApprovalCard`
-element in the DSH web UI shows `client/client.js:line:col`.
+element in the DSH web UI shows `dist/client/index.js:line:col`.
 
 ```sh
-npm run inject:dev      # NODE_ENV=development dcf instrument client --write
-npm run inject:revert   # restore the tracked file when you are done
+npm run inject:dev      # build client, then instrument only dist/client
+npm run inject:revert   # regenerate a clean client artifact; never reset source
 ```
 
 This project has no bundler config, so — unlike the tsdown/vite plugins — the
 elements are located by the **standalone instrument** entry applied to the
-hand-written client bundle. The overlay and the `/code-finder/api/*` routes come
+generated client bundle. The overlay and the `/code-finder/api/*` routes come
 from the host: `cordis.patch.yml` here is a plugin-type patch (insert-only), so
 `dcf init` intentionally adds no mount row (the host layer owns it).
 
 Two things to keep in mind:
 
-- **`client/client.js` is tracked source, not a build artifact.** Injection
-  reprints it (`+1063/−219` lines) and `prepack` only runs `tsc`, so it will
-  *not* be restored for you — run `npm run inject:revert` before committing or
-  `npm pack`. Injection is idempotent and reverting is byte-exact.
+- **Only generated output is instrumented.** `src/client/` remains untouched.
+  `npm run inject:revert` rebuilds the clean artifact, while `prepack` cleans
+  and rebuilds every production output so injected debug code is not packaged.
 - **Name-level search needs a root.** Precise coordinates come from the
   injection; the declaration-name fallback additionally requires this repo's
-  `client/` directory in the profile roots: `dcf roots add web "$PWD/client"`
+  `src/client/` directory in the profile roots: `dcf roots add web "$PWD/src/client"`
   (idempotent). Roots are read at boot, so restart the host after changing them
   (`dsh web stop && dsh web`).
 

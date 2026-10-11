@@ -1,7 +1,7 @@
 /**
  * Client-half tests.
  *
- * The bundle is hand-written lazy-CJS, so it can be exercised in Node with a
+ * The generated bundle preserves DSH's lazy-CJS protocol and runs in Node with a
  * fake module-table loader, a fake React and a fake client context. That covers
  * the logic a browser would run — registration shape, gating, session creation,
  * draft seeding and proposed-diff opening — without a browser or a bundler.
@@ -12,6 +12,8 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { readFile } from 'node:fs/promises'
+import { runInNewContext } from 'node:vm'
 import { COMMIT_AGENT_SESSION_PREFIX } from '../src/host/tools.js'
 
 /** Minimal element node produced by the fake React. */
@@ -28,7 +30,9 @@ interface Registration {
 
 /** Fake React with just enough surface for the bundle. */
 function fakeReact(): Record<string, unknown> {
+  let nextId = 0
   return {
+    useId: () => 'test-icon-' + ++nextId,
     createElement(type: unknown, props: Record<string, unknown> | null, ...children: unknown[]): unknown {
       const filtered = children.filter((child) => child !== null && child !== undefined && child !== false)
       // React collapses a single child to that child and keeps several as an
@@ -70,7 +74,7 @@ async function loadBundle(): Promise<{ exports: Record<string, unknown>; registr
       },
     }
     try {
-      const url = new URL('../../client/client.js', import.meta.url).href
+      const url = new URL('../../dist/client/index.js', import.meta.url).href
       await import(url)
     } finally {
       if (previous === undefined) delete globalWithWindow.window
@@ -85,6 +89,9 @@ async function loadBundle(): Promise<{ exports: Record<string, unknown>; registr
   const exports = cachedRegistration.factory((spec: string) => {
     if (spec === 'react') return react
     if (spec === '@deepseek-ai/dsh-client-ui-primitives') return {
+      IconRobotOutlineRegular: () => ({ type: 'robot-artwork', props: {} }),
+      IconQueueOutlineRegular: () => ({ type: 'message-artwork', props: {} }),
+      IconBranchOutlineRegular: () => ({ type: 'git-artwork', props: {} }),
       MenuItemButton: (props: Record<string, unknown>) => ({
         type: 'button', props: { ...props, role: 'menuitem', onClick: props['onSelect'] },
       }),
@@ -288,6 +295,33 @@ function fakeCtx(options: {
     },
   }
 }
+
+test('generated artifact stays lazy, keeps module state per factory and matches deterministic assembly', async () => {
+  const artifactUrl = new URL('../../dist/client/index.js', import.meta.url)
+  const artifact = await readFile(artifactUrl, 'utf8')
+  const builderUrl = new URL('../../scripts/build-client.mjs', import.meta.url).href
+  const builder = await import(builderUrl) as { renderClient(): Promise<string> }
+  assert.equal(artifact, await builder.renderClient(), 'artifact must be reproducible from current sources')
+  let registrations = 0
+  let captured: Registration | undefined
+  runInNewContext(artifact, {
+    window: { __ModuleLoader__: { load(value: Registration) { registrations += 1; captured = value } } },
+  })
+  assert.equal(registrations, 1, 'evaluating the artifact only registers its lazy entry')
+  assert.ok(captured)
+  const required: string[] = []
+  const require = (id: string) => {
+    required.push(id)
+    return id === 'react' ? fakeReact() : {}
+  }
+  const first = captured.factory(require)
+  const second = captured.factory(require)
+  assert.deepEqual(required, ['react', '@deepseek-ai/dsh-client-ui-primitives', 'react', '@deepseek-ai/dsh-client-ui-primitives'])
+  assert.notEqual(first, second)
+  assert.notEqual(first['__test'], second['__test'])
+  assert.notEqual((first['__test'] as Record<string, unknown>)['CARD_ACTION_COPY'],
+    (second['__test'] as Record<string, unknown>)['CARD_ACTION_COPY'], 'no feature singleton leaks across factory instances')
+})
 
 test('the bundle registers itself under the package name and exports inject/apply', async () => {
   const { exports, registration } = await loadBundle()
@@ -1505,7 +1539,7 @@ test('cold Inspector fetches the source snapshot without any display session', a
   } finally { globalThis.fetch = oldFetch }
 })
 
-async function paletteHarness() {
+async function paletteHarness(options: { legacyIcons?: boolean; failIconRegistration?: boolean } = {}) {
   const { exports } = await loadBundle()
   let activeLocale = 'zh-CN'
   const localeListeners = new Set<() => void>()
@@ -1535,7 +1569,14 @@ async function paletteHarness() {
   const sessions = get('sessions')
   sessions.list = store(() => ({ byId: { current: { id: current, retainedBy: { mainView: 1 } } } }))
   get('workspaces').list = store(() => ({ items }))
+  const icons = new Map<string, (props: Record<string, unknown>) => unknown>()
   const palette = {
+    registerIcon: options.legacyIcons ? undefined : (id: string, component: (props: Record<string, unknown>) => unknown) => {
+      if (options.failIconRegistration && icons.size === 1) throw new Error('icon registration failed')
+      assert.equal(commands.length, 0, 'artwork registers before its commands')
+      icons.set(id, component)
+      return () => { icons.delete(id) }
+    },
     registerCommand(value: any) { commands.push(value); command ??= value; return () => { removed += 1 } },
     getSnapshot() { return { mode: 'commands' } },
     refresh() { refreshes += 1 },
@@ -1550,9 +1591,12 @@ async function paletteHarness() {
   }
   await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
   assert.equal(command, undefined, 'optional contribution waits for palette service')
-  activate!()
+  try { activate!() } catch (error) {
+    assert.equal(icons.size, 0, 'failed registration rolls back earlier artwork')
+    throw error
+  }
   return {
-    harness, command: command as any, inputCommand: commands[1], listeners, localeListeners,
+    harness, command: command as any, inputCommand: commands[1], listeners, localeListeners, icons,
     setLocale(value: string) { activeLocale = value; localeListeners.forEach(fn => fn()) },
     change(id: string) { current = id; listeners.forEach(fn => fn()) },
     remove() { items = [] },
@@ -1574,6 +1618,80 @@ test('palette registers optional current-workspace action and owns cleanup/refre
   assert.equal(p.listeners.size, 0)
 })
 
+test('palette owns no Git artwork: plugin registers namespaced icons and disposes them with commands', async () => {
+  const p = await paletteHarness()
+  assert.deepEqual([...p.icons.keys()], ['dsh-git-commit-agent.robot-git', 'dsh-git-commit-agent.message-git'])
+  const masks: string[] = []
+  for (const [id, component] of p.icons) {
+    const tree = component({ size: 24, className: 'custom-icon' })
+    const svg = findByType(tree, 'svg')!
+    assert.equal(svg.props['width'], 24)
+    assert.equal(svg.props['className'], 'custom-icon')
+    assert.ok(findByType(tree, id.endsWith('robot-git') ? 'robot-artwork' : 'message-artwork'))
+    assert.ok(findByType(tree, 'git-artwork'))
+    masks.push(String(findByType(tree, 'mask')!.props['id']))
+    assert.match(JSON.stringify(tree), /translate\(8 8\) scale\(\.5\)/)
+  }
+  assert.equal(new Set(masks).size, 2, 'mask IDs never collide across icon instances')
+  assert.equal(typeof JSON.parse(JSON.stringify(p.command.describe())).iconId, 'string')
+  p.cleanup(); p.cleanup()
+  assert.equal(p.icons.size, 0)
+  assert.equal(p.removed, 2)
+})
+
+test('Git badge cuts out the body with luminance and never paints a visible background', async () => {
+  const p = await paletteHarness()
+  const maskIds = new Set<string>()
+  for (const [id, component] of p.icons) {
+    for (const size of [12, 16, 24]) {
+      const tree = component({ size }) as Element
+      assert.equal(tree.props['fill'], 'none')
+      assert.equal(tree.props['height'], size)
+      const mask = findByType(tree, 'mask')!
+      const maskId = String(mask.props['id'])
+      assert.ok(!maskIds.has(maskId), 'multiple copies of either icon have independent masks')
+      maskIds.add(maskId)
+      assert.equal(mask.props['maskUnits'], 'userSpaceOnUse')
+      assert.equal(mask.props['maskContentUnits'], 'userSpaceOnUse')
+      assert.deepEqual(mask.props['style'], { maskType: 'luminance' })
+      const [keep, cutout] = mask.props['children'] as Element[]
+      assert.deepEqual(keep?.props, { width: 16, height: 16, fill: 'white', stroke: 'none', children: null })
+      assert.deepEqual(cutout?.props, {
+        x: 8, y: 8, width: 8, height: 8, rx: 1, fill: 'black', stroke: 'none', children: null,
+      })
+      const [, body, badge] = tree.props['children'] as Element[]
+      assert.equal(body?.props['mask'], 'url(#' + maskId + ')')
+      assert.ok(findByType(body, id.endsWith('robot-git') ? 'robot-artwork' : 'message-artwork'))
+      assert.equal(badge?.props['mask'], undefined, 'badge remains outside the body cutout')
+      assert.ok(findByType(badge, 'git-artwork'))
+      // Walk only visible content: white/black mask geometry is deliberately
+      // in defs. A backing rect/path outside defs would make selected grey or
+      // dark rows show the wrong colour again, regardless of theme tokens.
+      for (const visible of [body, badge]) walk(visible, (element) => {
+        assert.ok(!['rect', 'path', 'circle'].includes(String(element.type)),
+          'the composition reuses primitives without a painted backing or copied glyph')
+        assert.ok(element.props['fill'] === undefined || ['none', 'currentColor'].includes(String(element.props['fill'])))
+        assert.equal(element.props['style'], undefined, 'no background style or theme-colour override')
+      })
+      assert.equal(tree.props['style'], undefined)
+    }
+  }
+  assert.equal(maskIds.size, 6)
+  p.cleanup()
+})
+
+test('partial icon registration failure rolls back previous icons', async () => {
+  await assert.rejects(paletteHarness({ failIconRegistration: true }), /icon registration failed/)
+})
+
+test('legacy palette without registerIcon still receives serializable commands', async () => {
+  const p = await paletteHarness({ legacyIcons: true })
+  assert.equal(p.icons.size, 0)
+  assert.equal(p.command.describe().iconId, 'dsh-git-commit-agent.robot-git')
+  assert.equal(p.inputCommand.describe().iconId, 'dsh-git-commit-agent.message-git')
+  p.cleanup()
+})
+
 test('palette exposes bilingual plugin tag, titles and semantic action icon dynamically', async () => {
   const p = await paletteHarness()
   const zh = p.command.describe()
@@ -1583,16 +1701,25 @@ test('palette exposes bilingual plugin tag, titles and semantic action icon dyna
   })
   assert.deepEqual(zh.pluginTag, {
     id: 'dsh-git-commit-agent', title: 'Git Commit Agent',
-    localizedTitles: { zh: 'Git 提交助手', en: 'Git Commit Agent' }, iconId: 'git',
+    localizedTitles: { zh: 'Git 提交助手', en: 'Git Commit Agent' }, iconId: 'dsh-git-commit-agent.robot-git',
   })
-  assert.equal(zh.iconId, undefined)
-  assert.equal(zh.icon, '🤖', 'the start command uses a robot icon')
+  const commandIcons = [[p.command, 'dsh-git-commit-agent.robot-git'], [p.inputCommand, 'dsh-git-commit-agent.message-git']] as const
+  for (const [command, iconId] of commandIcons) {
+    const description = command.describe()
+    assert.equal(description.iconId, iconId, 'CMD icons distinguish agent creation from filling a Git message')
+    assert.equal(description.icon, undefined, 'no emoji or plugin-owned icon overrides the semantic icon')
+    assert.equal(description.pluginTag, zh.pluginTag, 'both CMD actions share the robot plugin identity')
+  }
   for (const locale of ['en', 'en-US', 'en_US']) {
     p.setLocale(locale)
     const en = p.command.describe()
     assert.equal(en.title, zh.localizedTitles.en)
     assert.equal(en.pluginTag, zh.pluginTag, 'stable shared plugin identity')
     assert.equal(en.localizedTitles, zh.localizedTitles)
+    for (const [command, iconId] of commandIcons) {
+      assert.equal(command.describe().iconId, iconId, 'distinct action icons survive locale changes')
+      assert.equal(command.describe().pluginTag, zh.pluginTag)
+    }
   }
   assert.equal(p.refreshes, 3)
   p.change('ungrouped')
@@ -1646,13 +1773,25 @@ test('palette fills the active composer with a tool-agnostic prompt without crea
   assert.equal(p.harness.submits, 0)
   assert.match(p.harness.drafts[0]!, /worktree: \/repo/)
   assert.match(p.harness.drafts[0]!, /当前会话已有的工具/)
-  assert.match(p.harness.drafts[0]!, /等待我明确批准/)
+  assert.match(p.harness.drafts[0]!, /本次会话直接执行一次提交任务/)
+  assert.match(p.harness.drafts[0]!, /不绕过工具审批，也不授权后续提交任务/)
+  assert.match(p.harness.drafts[0]!, /保留已有暂存内容并纳入第一个提交/)
+  assert.match(p.harness.drafts[0]!, /检查后发生变化时，停下来询问/)
+  assert.match(p.harness.drafts[0]!, /不要 amend 或 push/)
+  assert.match(p.harness.drafts[0]!, /使用中文简短汇报/)
+  assert.doesNotMatch(p.harness.drafts[0]!, /等待我明确批准|逐个展示文件/)
   assert.doesNotMatch(p.harness.drafts[0]!, /commit_agent_|changeId|审批面板/)
   p.setLocale('en')
   assert.equal(p.inputCommand.describe().title, 'Fill Commit Planning Prompt in Current Session')
   await p.inputCommand.target.execute({ signal })
   assert.match(p.harness.drafts[1]!, /tools already available/)
-  assert.match(p.harness.drafts[1]!, /wait for my explicit approval/)
+  assert.match(p.harness.drafts[1]!, /authorize this commit task once in the current session/)
+  assert.match(p.harness.drafts[1]!, /does not bypass tool approvals or authorize future commit tasks/)
+  assert.match(p.harness.drafts[1]!, /Preserve existing staged content/)
+  assert.match(p.harness.drafts[1]!, /changes occur after inspection, stop and ask/)
+  assert.match(p.harness.drafts[1]!, /amend or push unless separately requested/)
+  assert.match(p.harness.drafts[1]!, /Keep output brief and in English/)
+  assert.doesNotMatch(p.harness.drafts[1]!, /wait for my explicit approval|Show the files/)
   p.cleanup()
 })
 
