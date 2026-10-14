@@ -154,7 +154,10 @@ export async function repositoryLinksForSession(owner: HostPluginContext, scope:
   const sessionSubprocess = scoped?.get?.<RepositorySubprocess>('subprocess')
   // Local discovery cannot share SSH paths/providers. Reject remote mirrors
   // too (including detached sessions) instead of probing the wrong machine.
-  if (!subprocess || (sessionSubprocess && sessionSubprocess !== subprocess) || /(?:^|[\\/])remote-workspaces(?:[\\/]|$)/i.test(cwd)) throw new RouteError(503, 'repository links unavailable')
+  // Cordis returns context-bound proxies, so object inequality is not provider
+  // inequality. Compare underlying services, but execute through the bound proxy.
+  const original = (service: RepositorySubprocess): unknown => Reflect.get(service, Symbol.for('cordis.original')) ?? service
+  if (!subprocess || (sessionSubprocess && original(sessionSubprocess) !== original(subprocess)) || /(?:^|[\\/])remote-workspaces(?:[\\/]|$)/i.test(cwd)) throw new RouteError(503, 'repository links unavailable')
   const roots = await repositoryRoots(subprocess, cwd)
   if (!roots.length) throw new RouteError(404, 'repository not found')
   const requestedRoot = repoRoot === undefined ? undefined : await realpath(repoRoot).catch(() => repoRoot)

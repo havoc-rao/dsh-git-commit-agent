@@ -99,7 +99,21 @@ test('authenticated HTTP route enforces session/repository/worktree authority an
     assert.equal((await request(`scope=live&worktree=${encodeURIComponent(foreign.root)}`)).status, 403)
     assert.ok(calls.every(call => call.cwd !== foreign.root))
     assert.equal(await readFile(join(fixture.root, '.git', 'config'), 'utf8'), before)
-    services.agents = { get() { return { ctx: { get() { return {} } } } } }
+    // Real Cordis reads return distinct context-bound proxies of one provider.
+    const bound = () => new Proxy(processService, { get(target, key) {
+      if (key === Symbol.for('cordis.original')) return target
+      return Reflect.get(target, key)
+    } })
+    services.subprocess = bound()
+    services.agents = { get() { return { ctx: { get() { return bound() } } } } }
+    const proxied = await request('scope=live')
+    assert.equal(proxied.status, 200)
+    assert.deepEqual(proxied.body, expected)
+    // A genuinely distinct provider (e.g. SSH) still cannot use local discovery.
+    const remoteService = subprocess([])
+    services.agents = { get() { return { ctx: { get() { return new Proxy(remoteService, { get(target, key) {
+      return key === Symbol.for('cordis.original') ? target : Reflect.get(target, key)
+    } }) } } } } }
     const remotePrior = calls.length
     assert.equal((await request('scope=live')).status, 503); assert.equal(calls.length, remotePrior)
     delete services.agents
