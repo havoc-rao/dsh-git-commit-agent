@@ -36,6 +36,26 @@ GitLens entry ──▶ dedicated native session ──▶ status/diff analysis
 
 122 automated tests pass against real, isolated git repositories (`npm test`).
 
+## Open remote repository
+
+The command palette includes **打开远程仓库 / Open Remote Repository** for the
+active session, preferring its selected GitLens repository/worktree when available,
+including clean checkouts. It reads fetch remotes through an authenticated,
+session-scoped read-only endpoint, without contacting the remote or changing Git
+state. `origin` opens directly; a single other remote also opens directly. If
+there are multiple remotes without `origin`, the new tab presents a link chooser.
+
+HTTP(S), `git://`, `ssh://`, and SCP-style `git@host:owner/repo.git` addresses
+are converted to HTTPS repository pages. Credentials, query/fragment, and the
+terminal `.git` suffix are removed; SSH/Git transport ports are not reused as web
+ports. Local paths and unsupported transports are excluded. This opens the
+configured remote (which may be a fork), not an automatically discovered upstream.
+Custom SSH host aliases or separate SSH/Web domains need a real web-address
+mapping and cannot be reliably inferred by this action. The current endpoint
+supports local session repositories; detected SSH execution providers and remote
+workspace mirrors fail closed rather than reading Git configuration on the wrong
+machine.
+
 ## Plan Inspector (including no active session)
 
 With better-sidebar's `inspectors` feature, the plugin registers two stable

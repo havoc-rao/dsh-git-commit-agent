@@ -7,7 +7,8 @@ const { buildPlanningPrompt } = require('./prompts.cjs')
 const { resolvePromptLanguage, promptLanguageFor, readPromptLanguageValue, readDefaultModelValue, loadModelCatalog, applyStoredDefaultModel, modelKey } = require('./settings.cjs')
 const { CARD_ACTION_LOCALE, CARD_ACTION_COPY, CardConfigureAction, ConfigureDialog, LanguageOptionsBox, ModelOptionsBox } = require('./settings-ui.cjs')
 const { startPlanning } = require('./session.cjs')
-const { registerCommitPalette } = require('./palette.cjs')
+const { applyCommandPalette } = require('./command-palette/index.cjs')
+const { loadRepositoryLinks, openRepositoryLinks } = require('./command-palette/repository-link.cjs')
 const { CommitAction } = require('./git-action.cjs')
 const { planMetaOf, planIdentity, planKind, planUrl } = require('./plan-model.cjs')
 const { FullPlan, PlanPage } = require('./plan-views.cjs')
@@ -24,14 +25,7 @@ exports.inject = ['slots', 'sessions', 'betterSidebar', 'sidebarRight']
 exports.apply = async function apply(ctx) {
   injectStyles()
 
-  // Optional enhancement: absence/late arrival of palette never blocks GitLens.
-  if (typeof ctx.inject === 'function') {
-    ctx.inject(['commandPalette'], function (paletteCtx) {
-      paletteCtx.effect(function () {
-        return registerCommitPalette(paletteCtx, service(paletteCtx, 'commandPalette'))
-      })
-    })
-  }
+  applyCommandPalette(ctx)
 
   const sidebar = service(ctx, 'betterSidebar')
   const planSidebar = createPlanSidebar(ctx)
@@ -107,6 +101,8 @@ exports.apply = async function apply(ctx) {
 
 // Internal hooks for the unit tests; the module table ignores them.
 exports.__test = {
+  loadRepositoryLinks,
+  openRepositoryLinks,
   buildPlanningPrompt: buildPlanningPrompt,
   resolvePromptLanguage: resolvePromptLanguage,
   promptLanguageFor: promptLanguageFor,

@@ -11,11 +11,12 @@
 import { readFile, mkdir, writeFile } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Script } from 'node:vm'
+import { posix } from 'node:path'
 
 const root = new URL('../', import.meta.url)
 export const clientModules = Object.freeze([
   'runtime', 'constants', 'context', 'styles', 'prompts', 'settings', 'icons',
-  'palette-copy', 'session', 'palette', 'settings-ui', 'git-action',
+  'command-palette/copy', 'session', 'command-palette/commands', 'command-palette/repository-link', 'command-palette/index', 'settings-ui', 'git-action',
   'plan-model', 'plan-views', 'plan-sidebar', 'plan-cards', 'index',
 ])
 const externalModules = new Set(['react', '@deepseek-ai/dsh-client-ui-primitives'])
@@ -25,15 +26,19 @@ export async function renderClient() {
   const modules = await Promise.all(clientModules.map(async (name) => {
     const source = await readFile(new URL(`src/client/${name}.cjs`, root), 'utf8')
     new Script(`(function(require, module, exports) {\n${source}\n})`, { filename: `src/client/${name}.cjs` })
-    const dependencies = [...source.matchAll(/\brequire\(['"]([^'"]+)['"]\)/g)].map((match) => match[1])
-    for (const dependency of dependencies) {
-      if (externalModules.has(dependency)) continue
-      if (!dependency.startsWith('./') || !dependency.endsWith('.cjs')
-        || !clientModules.includes(dependency.slice(2, -4))) {
+    const dependencies = []
+    // Resolve local imports against their module, then use canonical table IDs.
+    const bundledSource = source.replace(/\brequire\(['"]([^'"]+)['"]\)/g, (expression, dependency) => {
+      if (externalModules.has(dependency)) return expression
+      const resolved = posix.normalize(posix.join(posix.dirname(name), dependency))
+      if (!(dependency.startsWith('./') || dependency.startsWith('../'))
+        || !resolved.endsWith('.cjs') || !clientModules.includes(resolved.slice(0, -4))) {
         throw new Error(`${name}.cjs: undeclared client dependency ${dependency}`)
       }
-    }
-    return { name, source, dependencies }
+      dependencies.push(`./${resolved}`)
+      return `require(${JSON.stringify(`./${resolved}`)})`
+    })
+    return { name, source: bundledSource, dependencies }
   }))
   // Acyclic feature composition avoids partial exports and order-dependent startup.
   const visited = new Set(), active = new Set()

@@ -332,7 +332,7 @@ test('the bundle registers itself under the package name and exports inject/appl
   assert.equal(typeof exports['apply'], 'function')
 })
 
-test('apply registers only the native More action slot with the delivered contract shape', async () => {
+test('apply registers native More actions with the delivered contract shape', async () => {
   const { exports } = await loadBundle()
   const harness = fakeCtx()
   await (exports['apply'] as (ctx: unknown) => Promise<void>)(harness.ctx)
@@ -1596,7 +1596,7 @@ async function paletteHarness(options: { legacyIcons?: boolean; failIconRegistra
     throw error
   }
   return {
-    harness, command: command as any, inputCommand: commands[1], listeners, localeListeners, icons,
+    harness, command: command as any, inputCommand: commands[1], repositoryCommand: commands[2], listeners, localeListeners, icons,
     setLocale(value: string) { activeLocale = value; localeListeners.forEach(fn => fn()) },
     change(id: string) { current = id; listeners.forEach(fn => fn()) },
     remove() { items = [] },
@@ -1614,7 +1614,7 @@ test('palette registers optional current-workspace action and owns cleanup/refre
   assert.ok(p.command.describe().disabledReason)
   assert.equal(p.refreshes, 1) // shared listener refreshes command availability
   p.cleanup(); p.cleanup()
-  assert.equal(p.removed, 2)
+  assert.equal(p.removed, 3)
   assert.equal(p.listeners.size, 0)
 })
 
@@ -1636,7 +1636,7 @@ test('palette owns no Git artwork: plugin registers namespaced icons and dispose
   assert.equal(typeof JSON.parse(JSON.stringify(p.command.describe())).iconId, 'string')
   p.cleanup(); p.cleanup()
   assert.equal(p.icons.size, 0)
-  assert.equal(p.removed, 2)
+  assert.equal(p.removed, 3)
 })
 
 test('Git badge cuts out the body with luminance and never paints a visible background', async () => {
@@ -1885,4 +1885,93 @@ test('cold plan descriptors recover using exact route even without native params
     assert.equal(query.get('revision'), '7')
     assert.equal(query.get('digest'), 'exact-digest')
   } finally { globalThis.fetch = oldFetch }
+})
+
+
+test('repository link failures close reserved tab and unsafe links never navigate', async () => {
+  const { exports } = await loadBundle()
+  const hooks = exports['__test'] as any
+  const priorFetch = globalThis.fetch
+  let closed = 0
+  let navigated = 0
+  const tab = { closed: false, close() { closed += 1 }, location: { replace() { navigated += 1 } } }
+  try {
+    for (const links of [[], [{ name: 'origin', url: 'javascript:alert(1)' }], [{ name: 'origin', url: 'https://token@github.com/team/repo' }]]) {
+      globalThis.fetch = (async () => ({ ok: true, json: async () => ({ links }) } as Response)) as typeof fetch
+      await assert.rejects(hooks.openRepositoryLinks({ scope: { sessionId: 'lens' } }, tab))
+    }
+    assert.equal(closed, 3)
+    assert.equal(navigated, 0)
+  } finally { globalThis.fetch = priorFetch }
+})
+
+
+test('repository link chooser uses text nodes for multiple non-origin remotes', async () => {
+  const { exports } = await loadBundle()
+  const hooks = exports['__test'] as any
+  const priorFetch = globalThis.fetch
+  const rows: any[] = []
+  const document = {
+    title: '',
+    createElement(tag: string): any { return { tag, children: [], appendChild(child: any) { this.children.push(child) } } },
+    body: { replaceChildren(...children: any[]) { rows.splice(0, rows.length, ...children) }, appendChild(child: any) { rows.push(child) } },
+  }
+  try {
+    globalThis.fetch = (async () => ({ ok: true, json: async () => ({ links: [
+      { name: '<script>bad</script>', url: 'https://github.com/team/a' },
+      { name: 'upstream', url: 'https://gitlab.com/team/b' },
+    ] }) } as Response)) as typeof fetch
+    await hooks.openRepositoryLinks({ scope: { sessionId: 'lens' } }, { closed: false, document })
+    assert.equal(rows.length, 3)
+    assert.equal(rows[1].children[0].textContent, '<script>bad</script> — https://github.com/team/a')
+    assert.equal(rows[1].children[0].rel, 'noopener noreferrer')
+    assert.equal(rows[2].children[0].href, 'https://gitlab.com/team/b')
+  } finally { globalThis.fetch = priorFetch }
+})
+
+
+test('palette registers repository action and opens active session repository safely', async () => {
+  const p = await paletteHarness()
+  const command = p.repositoryCommand
+  assert.equal(command.id, 'dsh-git-commit-agent.open-repository')
+  assert.equal(command.describe().title, '打开远程仓库')
+  p.setLocale('en-US')
+  assert.equal(command.describe().title, 'Open Remote Repository')
+  const globals = globalThis as any
+  const priorWindow = globals.window
+  const priorFetch = globalThis.fetch
+  let opened = 0; let closed = 0; let navigated = ''; let requested = ''
+  const tab = { opener: {}, closed: false, close() { closed++ }, location: { replace(url: string) { navigated = url } } }
+  globals.window = { open() { opened++; return tab } }
+  globalThis.fetch = (async (url: unknown) => { requested = String(url); return { ok: true, json: async () => ({ links: [{ name: 'origin', url: 'https://github.com/team/repo' }] }) } as Response }) as typeof fetch
+  try {
+    const cancelled = new AbortController(); cancelled.abort()
+    assert.equal((await command.target.execute({ signal: cancelled.signal })).kind, 'cancelled')
+    assert.equal(opened, 0)
+    assert.equal((await command.target.execute({ signal: new AbortController().signal })).kind, 'completed')
+    assert.equal(new URL(requested, 'http://local').searchParams.get('scope'), 'source')
+    assert.equal(tab.opener, null)
+    assert.equal(navigated, 'https://github.com/team/repo')
+    globalThis.fetch = (async () => ({ ok: false, status: 503 } as Response)) as typeof fetch
+    assert.equal((await command.target.execute({ signal: new AbortController().signal })).kind, 'failed')
+    assert.ok(closed > 0)
+    assert.equal(p.harness.created.length, 0)
+  } finally { globals.window = priorWindow; globalThis.fetch = priorFetch; p.cleanup() }
+})
+
+
+test('repository palette action reports popup blocking without fetching', async () => {
+  const p = await paletteHarness()
+  const globals = globalThis as any
+  const priorWindow = globals.window
+  const priorFetch = globalThis.fetch
+  let fetched = false
+  globals.window = { open: () => null }
+  globalThis.fetch = (async () => { fetched = true; throw new Error('unexpected fetch') }) as typeof fetch
+  try {
+    const result = await p.repositoryCommand.target.execute({ signal: new AbortController().signal })
+    assert.equal(result.kind, 'failed')
+    assert.match(result.message, /浏览器阻止/)
+    assert.equal(fetched, false)
+  } finally { globals.window = priorWindow; globalThis.fetch = priorFetch; p.cleanup() }
 })

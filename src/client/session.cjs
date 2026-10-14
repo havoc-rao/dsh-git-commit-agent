@@ -3,7 +3,7 @@ const { service } = require('./context.cjs')
 const { SESSION_ID_PREFIX } = require('./constants.cjs')
 const { buildPlanningPrompt } = require('./prompts.cjs')
 const { promptLanguageFor, applyStoredDefaultModel } = require('./settings.cjs')
-const { paletteCopy } = require('./palette-copy.cjs')
+const { paletteCopy } = require('./command-palette/copy.cjs')
 /** Compare two directory strings, ignoring a trailing separator. */
 function normalizePath(value) {
   if (typeof value !== 'string' || value === '') return ''

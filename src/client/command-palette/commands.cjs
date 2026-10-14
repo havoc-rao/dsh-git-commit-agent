@@ -1,11 +1,12 @@
 /** Optional command registration, execution guards, refresh and transactional teardown. */
-const { service } = require('./context.cjs')
-const { IconRobotOutlineRegular, IconQueueOutlineRegular, IconBranchOutlineRegular } = require('./runtime.cjs')
-const { ROBOT_GIT_ICON_ID, MESSAGE_GIT_ICON_ID, RobotGitIcon, MessageGitIcon } = require('./icons.cjs')
-const { CURRENT_PROMPT_TITLES, COMMIT_PALETTE_TITLES, COMMIT_PALETTE_TAG, paletteCopy } = require('./palette-copy.cjs')
-const { currentCommitWorkspace, currentCommitInput, startPlanning } = require('./session.cjs')
-const { buildCurrentSessionPrompt } = require('./prompts.cjs')
-const { promptLanguageFor } = require('./settings.cjs')
+const { service } = require('../context.cjs')
+const { IconRobotOutlineRegular, IconQueueOutlineRegular, IconBranchOutlineRegular } = require('../runtime.cjs')
+const { ROBOT_GIT_ICON_ID, MESSAGE_GIT_ICON_ID, RobotGitIcon, MessageGitIcon } = require('../icons.cjs')
+const { CURRENT_PROMPT_TITLES, COMMIT_PALETTE_TITLES, COMMIT_PALETTE_TAG, paletteCopy } = require('./copy.cjs')
+const { currentCommitWorkspace, currentCommitInput, startPlanning } = require('../session.cjs')
+const { buildCurrentSessionPrompt } = require('../prompts.cjs')
+const { promptLanguageFor } = require('../settings.cjs')
+const { registerRepositoryLinkCommand } = require('./repository-link.cjs')
 function registerCommitPalette(ctx, palette) {
   const disposers = []
   let disposed = false
@@ -106,6 +107,7 @@ function registerCommitPalette(ctx, palette) {
         },
       },
     }))
+    disposers.push(registerRepositoryLinkCommand(ctx, palette))
     const refresh = function () {
       if (palette.getSnapshot().mode === 'commands') palette.refresh()
     }

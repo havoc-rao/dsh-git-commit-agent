@@ -1,6 +1,6 @@
 /** Stable bilingual command metadata and active-locale feedback. */
-const { service } = require('./context.cjs')
-const { ROBOT_GIT_ICON_ID } = require('./icons.cjs')
+const { service } = require('../context.cjs')
+const { ROBOT_GIT_ICON_ID } = require('../icons.cjs')
 const CURRENT_PROMPT_TITLES = Object.freeze({
   zh: '将提交规划 prompt 填入当前会话',
   en: 'Fill Commit Planning Prompt in Current Session',
