@@ -1570,7 +1570,11 @@ async function paletteHarness(options: { legacyIcons?: boolean; failIconRegistra
   sessions.list = store(() => ({ byId: { current: { id: current, retainedBy: { mainView: 1 } } } }))
   get('workspaces').list = store(() => ({ items }))
   const icons = new Map<string, (props: Record<string, unknown>) => unknown>()
+  const pickers = new Map<string, any>()
+  let openedPicker = ''
   const palette = {
+    registerPicker(value: any) { pickers.set(value.id, value); return () => { pickers.delete(value.id) } },
+    openPicker(id: string) { openedPicker = id; return pickers.has(id) },
     registerIcon: options.legacyIcons ? undefined : (id: string, component: (props: Record<string, unknown>) => unknown) => {
       if (options.failIconRegistration && icons.size === 1) throw new Error('icon registration failed')
       assert.equal(commands.length, 0, 'artwork registers before its commands')
@@ -1596,7 +1600,8 @@ async function paletteHarness(options: { legacyIcons?: boolean; failIconRegistra
     throw error
   }
   return {
-    harness, command: command as any, inputCommand: commands[1], repositoryCommand: commands[2], listeners, localeListeners, icons,
+    harness, command: command as any, inputCommand: commands[1], repositoryCommand: commands[2], listeners, localeListeners, icons, pickers,
+    get openedPicker() { return openedPicker },
     setLocale(value: string) { activeLocale = value; localeListeners.forEach(fn => fn()) },
     change(id: string) { current = id; listeners.forEach(fn => fn()) },
     remove() { items = [] },
@@ -1620,9 +1625,20 @@ test('palette registers optional current-workspace action and owns cleanup/refre
 
 test('palette owns no Git artwork: plugin registers namespaced icons and disposes them with commands', async () => {
   const p = await paletteHarness()
-  assert.deepEqual([...p.icons.keys()], ['dsh-git-commit-agent.robot-git', 'dsh-git-commit-agent.message-git'])
+  assert.deepEqual([...p.icons.keys()], ['dsh-git-commit-agent.robot-git', 'dsh-git-commit-agent.message-git', 'dsh-git-commit-agent.web-git'])
+  const webId = 'dsh-git-commit-agent.web-git'
+  const repository = p.repositoryCommand.describe()
+  assert.equal(repository.iconId, webId)
+  assert.equal(repository.pluginTag.iconId, webId)
+  assert.notEqual(repository.pluginTag.id, p.command.describe().pluginTag.id)
+  const web = p.icons.get(webId)!({ size: 16 })
+  assert.equal(findByType(web, 'svg')!.props['viewBox'], '0 0 16 16')
+  assert.ok(findByType(web, 'ellipse'), 'globe meridian remains visible')
+  assert.ok(findByType(web, 'mask'), 'badge cuts out globe without a painted backing')
+  assert.match(JSON.stringify(web), /currentColor/)
   const masks: string[] = []
   for (const [id, component] of p.icons) {
+    if (id.endsWith('web-git')) continue
     const tree = component({ size: 24, className: 'custom-icon' })
     const svg = findByType(tree, 'svg')!
     assert.equal(svg.props['width'], 24)
@@ -1643,6 +1659,7 @@ test('Git badge cuts out the body with luminance and never paints a visible back
   const p = await paletteHarness()
   const maskIds = new Set<string>()
   for (const [id, component] of p.icons) {
+    if (id.endsWith('web-git')) continue
     for (const size of [12, 16, 24]) {
       const tree = component({ size }) as Element
       assert.equal(tree.props['fill'], 'none')
@@ -1973,5 +1990,73 @@ test('repository palette action reports popup blocking without fetching', async 
     assert.equal(result.kind, 'failed')
     assert.match(result.message, /浏览器阻止/)
     assert.equal(fetched, false)
+  } finally { globals.window = priorWindow; globalThis.fetch = priorFetch; p.cleanup() }
+})
+
+
+test('desktop opens only final HTTPS URLs and treats a null popup as external handoff', async () => {
+  const p = await paletteHarness()
+  const globals = globalThis as any
+  const priorWindow = globals.window; const priorFetch = globalThis.fetch
+  const opened: unknown[][] = []
+  globals.window = { dshDesktop: { protocolVersion: 1 }, open(...args: unknown[]) { opened.push(args); return null } }
+  let links = [{ name: 'origin', url: 'https://github.com/team/repo' }]
+  globalThis.fetch = (async () => ({ ok: true, json: async () => ({ links }) } as Response)) as typeof fetch
+  try {
+    const result = await p.repositoryCommand.target.execute({ signal: new AbortController().signal })
+    assert.equal(result.kind, 'completed'); assert.match(result.message, /已请求默认浏览器/)
+    assert.deepEqual(opened, [['https://github.com/team/repo', '_blank', 'noopener,noreferrer']])
+    globals.window = { dshDesktopShell: {}, open(...args: string[]) { opened.push(args); return null } }
+    assert.equal((await p.repositoryCommand.target.execute({ signal: new AbortController().signal })).kind, 'completed')
+    assert.equal(opened.length, 2)
+    opened.pop()
+    links = [{ name: 'origin', url: 'javascript:alert(1)' }]
+    assert.equal((await p.repositoryCommand.target.execute({ signal: new AbortController().signal })).kind, 'failed')
+    assert.equal(opened.length, 1)
+    const abort = new AbortController()
+    globalThis.fetch = (async () => { abort.abort(); return { ok: true, json: async () => ({ links: [{ name: 'origin', url: 'https://github.com/team/repo' }] }) } as Response }) as typeof fetch
+    assert.equal((await p.repositoryCommand.target.execute({ signal: abort.signal })).kind, 'cancelled')
+    assert.equal(opened.length, 1)
+  } finally { globals.window = priorWindow; globalThis.fetch = priorFetch; p.cleanup() }
+})
+
+test('desktop chooses multiple remotes in the palette and rejects stale selections', async () => {
+  const p = await paletteHarness()
+  const globals = globalThis as any
+  const priorWindow = globals.window; const priorFetch = globalThis.fetch
+  const opened: string[] = []
+  globals.window = { dshDesktop: { protocolVersion: 1 }, open(url: string) { opened.push(url); return null } }
+  globalThis.fetch = (async () => ({ ok: true, json: async () => ({ links: [
+    { name: 'origin', url: 'https://github.com/team/a' },
+    { name: 'offical', url: 'https://gitlab.com/team/b' },
+  ] }) } as Response)) as typeof fetch
+  const args = { signal: new AbortController().signal }
+  try {
+    assert.equal((await p.repositoryCommand.target.execute(args)).kind, 'stay')
+    assert.equal(opened.length, 0)
+    const picker = p.pickers.get(p.openedPicker)
+    assert.deepEqual(picker.query({ ...args, query: 'gitlab' }).items, [{ id: JSON.stringify(['offical', 'https://gitlab.com/team/b']), label: 'offical', detail: 'https://gitlab.com/team/b' }])
+    assert.equal(picker.accept('https://evil.example/', args).kind, 'failed')
+    assert.equal(picker.accept(JSON.stringify(['offical', 'https://gitlab.com/team/b']), args).kind, 'completed')
+    assert.deepEqual(opened, ['https://gitlab.com/team/b'])
+    // Web also uses the nested palette, closing its asynchronously reserved tab.
+    let closed = 0
+    let navigated = ''
+    const tab = { opener: {}, closed: false, close() { closed++; this.closed = true }, location: { replace(url: string) { navigated = url } } }
+    globals.window = { open() { return tab } }
+    assert.equal((await p.repositoryCommand.target.execute(args)).kind, 'stay')
+    assert.equal(closed, 1)
+    assert.equal(navigated, '')
+    const selectedTab = { opener: {}, location: { replace(url: string) { navigated = url } } }
+    globals.window = { open() { return selectedTab } }
+    assert.equal(picker.accept(JSON.stringify(['origin', 'https://github.com/team/a']), args).kind, 'completed')
+    assert.equal(navigated, 'https://github.com/team/a')
+    assert.equal(selectedTab.opener, null)
+    globals.window = { dshDesktop: {}, open(url: string) { opened.push(url); return null } }
+    await p.repositoryCommand.target.execute(args)
+    p.change('different-session')
+    assert.equal(picker.accept(JSON.stringify(['origin', 'https://github.com/team/a']), args).kind, 'failed')
+    assert.equal(opened.length, 1)
+    p.cleanup(); assert.equal(p.pickers.size, 0)
   } finally { globals.window = priorWindow; globalThis.fetch = priorFetch; p.cleanup() }
 })

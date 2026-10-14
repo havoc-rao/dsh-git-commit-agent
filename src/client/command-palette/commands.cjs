@@ -1,7 +1,7 @@
 /** Optional command registration, execution guards, refresh and transactional teardown. */
 const { service } = require('../context.cjs')
 const { IconRobotOutlineRegular, IconQueueOutlineRegular, IconBranchOutlineRegular } = require('../runtime.cjs')
-const { ROBOT_GIT_ICON_ID, MESSAGE_GIT_ICON_ID, RobotGitIcon, MessageGitIcon } = require('../icons.cjs')
+const { ROBOT_GIT_ICON_ID, MESSAGE_GIT_ICON_ID, WEB_GIT_ICON_ID, RobotGitIcon, MessageGitIcon, WebGitIcon } = require('../icons.cjs')
 const { CURRENT_PROMPT_TITLES, COMMIT_PALETTE_TITLES, COMMIT_PALETTE_TAG, paletteCopy } = require('./copy.cjs')
 const { currentCommitWorkspace, currentCommitInput, startPlanning } = require('../session.cjs')
 const { buildCurrentSessionPrompt } = require('../prompts.cjs')
@@ -32,6 +32,7 @@ function registerCommitPalette(ctx, palette) {
       if (typeof IconQueueOutlineRegular === 'function' && typeof IconBranchOutlineRegular === 'function') {
         disposers.push(palette.registerIcon(MESSAGE_GIT_ICON_ID, MessageGitIcon))
       }
+      disposers.push(palette.registerIcon(WEB_GIT_ICON_ID, WebGitIcon))
     }
     disposers.push(palette.registerCommand({
       id: 'dsh-git-commit-agent.start-current-workspace',
