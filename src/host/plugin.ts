@@ -25,6 +25,7 @@ import {
 } from './tools.js'
 import { EditCapabilityController } from './edit-capability.js'
 import { mountPlanHttpRoutes } from './plan-http.js'
+import { mountRepositoryLinksRoute } from './repository-links.js'
 import {
   buildCommitAgentSystemPrompt,
   buildInitialPlanRequest,
@@ -333,7 +334,10 @@ export function apply(ctx: HostPluginContext, config?: unknown): CommitAgentPlug
 
   // Dependency-owned HTTP routes use the public host authentication fence;
   // no routes are exposed at all on hosts without Connection admission.
-  ctx.inject?.(['webServer', 'connection'], (child) => mountPlanHttpRoutes(child, plugin.service))
+  ctx.inject?.(['webServer', 'connection'], (child) => {
+    mountPlanHttpRoutes(child, plugin.service)
+    mountRepositoryLinksRoute(child)
+  })
 
   const editCapabilities = new EditCapabilityController(plugin.service)
   const deps: ToolDependencies = {
